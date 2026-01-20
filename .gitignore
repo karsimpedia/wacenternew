@@ -1,0 +1,15 @@
+# node
+node_modules/
+
+# env
+.env
+
+# wa session (Baileys)
+auth/
+
+# logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
