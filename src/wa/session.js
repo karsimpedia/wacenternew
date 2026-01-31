@@ -57,6 +57,7 @@ export default class WASession {
     this.sock = makeWASocket({
       auth: state,
       markOnlineOnConnect: true,
+      syncFullHistory: false, 
       browser: ["Chrome", "Windows", "10"],
       logger: pino({ level: "info" }),
     });

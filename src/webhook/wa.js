@@ -1,24 +1,16 @@
-// src/webhook/wa.js
+// src/webhook/wa.js — CLEAN FINAL (stable)
+
 import express from "express";
 import axios from "axios";
-import {
-  detectMoodByRule,
-  detectMoodByHistory,
-  escalateMood,
-} from "../services/mood.service.js";
 import { prisma } from "../prisma.js";
 
-import {
-  getTrxStatus,
-  getSupplierCS,
-  getTodayTrxByTarget,
-} from "../services/mainApi.js";
+import { getTrxStatus } from "../services/mainApi.js";
 import { getOrCreateSession } from "../services/chatSession.service.js";
 import {
   saveIncomingMessage,
   saveAIReply,
 } from "../services/chatMessage.service.js";
-import { updateMemory } from "../services/memory.service.js";
+import { dispatchToSupplier } from "../services/supplierDispatcher.js";
 
 const router = express.Router();
 
@@ -27,6 +19,17 @@ const WA_BASE = process.env.WA_API_BASE || `http://localhost:${PORT}`;
 const AI_DECIDE_URL = `http://localhost:${PORT}/ai/cs/decide`;
 const DEFAULT_SESSION = process.env.WA_DEFAULT_SESSION || "pc";
 
+// =========================
+// Flow constants (selaras Prisma)
+// =========================
+const FLOW = Object.freeze({
+  CHAT: "CHAT",
+  WAITING_TRX: "COMPLAIN_REQUEST", // dipakai sebagai WAITING_TRX_INFO
+});
+
+// =========================
+// Helpers
+// =========================
 function verifySecret(req) {
   const secret = req.headers["x-webhook-secret"];
   return (
@@ -35,359 +38,245 @@ function verifySecret(req) {
   );
 }
 
-async function waSend(session, phone, message) {
+async function waSend(sessionName, to, message) {
   await axios.post(
-    `${WA_BASE}/wa/${session}/send`,
-    { phone, message },
+    `${WA_BASE}/wa/${sessionName}/send`,
+    { phone: to, message },
     { timeout: 8000 },
   );
 }
 
-function extractMsisdn(text = "") {
-  const m = String(text).match(/08\d{8,12}/);
-  return m ? m[0] : null;
+function isGeneralChat(text = "") {
+  const t = String(text).trim().toLowerCase();
+  return (
+    t === "halo" ||
+    t === "hai" ||
+    t === "hi" ||
+    t === "pagi" ||
+    t === "siang" ||
+    t === "malam" ||
+    t.startsWith("tanya") ||
+    t.startsWith("mau tanya") ||
+    t.includes("tanya lain") ||
+    t === "permisi"
+  );
 }
 
-function extractTrxId(text = "") {
-  const m = String(text)
-    .toUpperCase()
-    .match(/\b(TRX\d{4,})\b/);
-  return m ? m[1] : null;
+function onlyDigits(text = "") {
+  return String(text).replace(/\D/g, "");
 }
 
-function detectCancelOrConfirm(text = "") {
-  const t = text.toLowerCase();
-
-  if (["ok", "oke", "ya", "iya", "lanjut"].includes(t)) return "CONFIRM";
-  if (["batal", "nggak jadi", "tidak jadi", "ga jadi", "cancel"].includes(t))
-    return "CANCEL";
-
-  return null;
+// minimal 5 digit (sesuai request kamu sebelumnya)
+function normalizeMsisdn(v) {
+  const d = onlyDigits(v);
+  return d.length >= 5 ? d : null;
 }
 
-router.post("/wa", async (req, res) => {
+function normalizeTrxId(v) {
+  const s = String(v || "").trim();
+  return s.length ? s : null;
+}
+
+function trxReplyMinimal(trx) {
+  const id = trx?.id ?? "-";
+  const status = trx?.status ?? "-";
+  const serial = trx?.serial ?? "-";
+  const msisdn = trx?.msisdn ?? "-";
+  const message = trx?.message ?? "-";
+
+  return `📄 *Status Transaksi*\nID: ${id}\nStatus: *${status}*\nSN: *${serial}*\nMSISDN: *${msisdn}*\nPesan: *${message}*`;
+}
+
+async function setSession(sessionId, data) {
+  await prisma.chatSession.update({ where: { id: sessionId }, data });
+}
+
+async function resetSession(sessionId) {
+  await prisma.chatSession.update({
+    where: { id: sessionId },
+    data: {
+      flowState: FLOW.CHAT,
+      lastIntent: "CHAT",
+      lastContext: null,
+      lastTarget: null,
+    },
+  });
+}
+
+// =========================
+// Webhook
+// =========================
+router.post("/", async (req, res) => {
   if (!verifySecret(req)) return res.status(401).json({ ok: false });
 
-  const sessionName = req.body.session || DEFAULT_SESSION;
+  const sessionName = String(req.body.session || DEFAULT_SESSION).trim();
   const from = String(req.body.from || "").trim();
-  const message = String(req.body.message || "").trim();
-  const messageId = req.body.messageId; // dari gateway WA
+  const userText = String(req.body.message || "").trim();
+  const messageId = req.body.messageId;
 
-  if (!from || !message) return res.json({ ok: true });
-  const action = detectCancelOrConfirm(message);
+  if (!from || !userText) return res.json({ ok: true });
+
   try {
-    // 1️⃣ get session
+    // 1) session db
     const session = await getOrCreateSession("WA", from);
 
-    // 2️⃣ save incoming message (idempotent)
-    const saved = await saveIncomingMessage({
-      sessionId: session.id,
-      message,
-      externalId: messageId,
-      rawPayload: req.body,
-    });
-
-    if (!saved) return res.json({ ok: true }); // duplicate
-
-    // ====== HARD STOP: USER MEMBATALKAN KOMPLAIN ======
-    if (action === "CANCEL" && session.lastIntent === "COMPLAIN") {
-      await prisma.chatSession.update({
-        where: { id: session.id },
-        data: {
-          lastIntent: "CHAT",
-          lastContext: null,
-          lastTarget: null,
-        },
-      });
-
-      await waSend(
-        sessionName,
+    // 2) simpan incoming (kalau service kamu support)
+    try {
+      await saveIncomingMessage({
+        sessionId: session.id,
         from,
-        "Baik kak 🙏 Komplain dibatalkan. Jika ingin komplain lagi atau cek transaksi, silakan kirimkan pesan ya.",
-      );
-
-      return res.json({ ok: true });
-    }
-
-    if (/^[1-5]$/.test(message) && session.lastTarget) {
-      const list = await getTodayTrxByTarget(session.lastTarget);
-      const trx = list[Number(message) - 1];
-
-      if (trx) {
-        await waSend(
-          sessionName,
-          from,
-          `📄 Status transaksi *${trx.id}*: *${trx.status}*`,
-        );
-      }
-      return res.json({ ok: true });
-    }
-
-    // ====== STATE RESPONSE: CONFIRM / CANCEL KOMPLAIN ======
-    if (action && session.lastIntent === "COMPLAIN") {
-      // === USER MEMBATALKAN KOMPLAIN ===
-      if (action === "CANCEL") {
-        await updateMemory(session.id, {
-          intent: "CHAT",
-          context: "User membatalkan komplain",
-        });
-
-        await waSend(
-          sessionName,
-          from,
-          "Baik kak 🙏 Komplain dibatalkan. Jika butuh bantuan lagi, silakan chat ya.",
-        );
-
-        return res.json({ ok: true });
-      }
-
-      // === USER KONFIRMASI KOMPLAIN ===
-      if (action === "CONFIRM") {
-        await updateMemory(session.id, {
-          intent: "COMPLAIN",
-          context: "User mengkonfirmasi komplain",
-        });
-
-        await waSend(
-          sessionName,
-          from,
-          "Siap kak 🙏 Komplain akan kami lanjutkan dan teruskan ke CS supplier.",
-        );
-        // jangan return
-      }
-    }
-
-    // ====== MOOD DETECTION ======
-    const ruleMood = detectMoodByRule(message);
-    let historyMood = "NORMAL";
-
-    if (ruleMood === "NORMAL") {
-      historyMood = await detectMoodByHistory(session.id);
-    }
-
-    const detected = ruleMood !== "NORMAL" ? ruleMood : historyMood;
-    const finalMood = escalateMood(session.mood, detected);
-
-    // update DB jika berubah
-    if (finalMood !== session.mood) {
-      await prisma.chatSession.update({
-        where: { id: session.id },
-        data: { mood: finalMood },
+        messageId: messageId || null,
+        message: userText,
       });
+    } catch (_) {
+      // optional: jangan bikin webhook fail kalau save log gagal
     }
 
-    // 3️⃣ AI decide
+    // 3) kalau lagi nunggu trx/msisdn tapi user nyapa → reset
+    if (session.flowState === FLOW.WAITING_TRX && isGeneralChat(userText)) {
+      await resetSession(session.id);
+      // lanjut ke AI decide normal
+    }
+
+    // 4) AI decide
     const aiResp = await axios.post(
       AI_DECIDE_URL,
       {
         sessionId: session.id,
         userId: from,
-        message,
+        message: userText,
         lastIntent: session.lastIntent,
         lastContext: session.lastContext,
       },
       { timeout: 15000 },
     );
 
-    const ai = aiResp.data?.data || {};
+    const ai = aiResp.data?.data || aiResp.data || {};
+    const intent = String(ai.intent || "CHAT").toUpperCase();
 
-    // ================= STATUS =================
-    if (ai.intent === "CHECK_STATUS") {
-      const trxId = ai.trxId || extractTrxId(message);
-      const msisdn = extractMsisdn(message) || session.lastTarget;
+    const trxId = normalizeTrxId(ai.trxId);
+    const msisdn = normalizeMsisdn(ai.msisdn);
 
-      // 🔒 GUARD CLAUSE — DATA BELUM LENGKAP
+    // =========================
+    // A) FOLLOWUP → kirim komplain ke supplier (kalau ada trx)
+    // =========================
+    if (intent === "FOLLOWUP") {
       if (!trxId && !msisdn) {
-        await waSend(
-          sessionName,
-          from,
-          "Siap kak 🙏 Boleh kirim *ID transaksi* atau *nomor tujuan* (contoh: 08123456789) biar saya cek transaksi hari ini?",
-        );
-        return res.json({ ok: true });
-      }
-
-      // =====================
-      // 1️⃣ CEK BY ID (JIKA ADA)
-      // =====================
-      if (trxId) {
-        const trx = await getTrxStatus(trxId);
-
-        if (!trx) {
-          await waSend(
-            sessionName,
-            from,
-            `ID *${trxId}* tidak ditemukan kak 🙏  
-Boleh cek lagi atau kirim *nomor tujuan* biar saya cari transaksi hari ini.`,
-          );
-          return res.json({ ok: true });
-        }
-
-        const reply = `
-📄 *Status Transaksi*
-
-ID: ${trx.id}
-Produk: ${trx.product}
-Tujuan: ${trx.target}
-Status: *${trx.status}*
-`.trim();
-
+        const reply =
+          ai.reply?.trim() ||
+          "Siap kak 🙏 boleh kirim ID transaksi atau nomor tujuan ya?";
         await waSend(sessionName, from, reply);
-
-        await prisma.chatSession.update({
-          where: { id: session.id },
-          data: { lastTarget: trx.target },
+        await saveAIReply({ sessionId: session.id, message: reply, intent });
+        await setSession(session.id, {
+          flowState: FLOW.WAITING_TRX,
+          lastIntent: intent,
+          lastContext: "ASK_TRX",
         });
-
         return res.json({ ok: true });
       }
 
-      // =====================
-      // 2️⃣ CEK BY NOMOR TUJUAN (HARI INI)
-      // =====================
-      const list = await getTodayTrxByTarget(msisdn);
-
-      if (list.length === 0) {
-        await waSend(
-          sessionName,
-          from,
-          `Hari ini belum ada transaksi untuk nomor *${msisdn}* kak 🙏`,
-        );
-        return res.json({ ok: true });
-      }
-
-      if (list.length === 1) {
-        const trx = list[0];
-        const reply = `
-📄 *Status Transaksi Hari Ini*
-
-Nomor: ${trx.target}
-Produk: ${trx.product}
-Status: *${trx.status}*
-ID: ${trx.id}
-`.trim();
-
-        await waSend(sessionName, from, reply);
-
-        await prisma.chatSession.update({
-          where: { id: session.id },
-          data: { lastTarget: trx.target },
-        });
-
-        return res.json({ ok: true });
-      }
-
-      // =====================
-      // 3️⃣ LEBIH DARI SATU → PILIH
-      // =====================
-      const options = list
-        .slice(0, 5)
-        .map((t, i) => `${i + 1}. ${t.product} (${t.status}) – ${t.id}`)
-        .join("\n");
-
-      await waSend(
-        sessionName,
-        from,
-        `Hari ini ada *${list.length} transaksi* untuk nomor *${msisdn}*:\n\n${options}\n\nBalas *nomor urutannya* ya kak 🙏`,
-      );
-
-      await prisma.chatSession.update({
-        where: { id: session.id },
-        data: { lastTarget: msisdn },
-      });
-
-      return res.json({ ok: true });
-    }
-
-    // ================= COMPLAIN =================
-    // ================= COMPLAIN =================
-    if (ai.intent === "COMPLAIN") {
-      const trxId = ai.trxId || extractTrxId(message);
-      const msisdn = extractMsisdn(message) || session.lastTarget;
-
-      if (!trxId && !msisdn) {
-        await waSend(
-          sessionName,
-          from,
-          "Siap kak 🙏 Mohon kirim *ID transaksi* atau *nomor tujuan* dulu ya, biar komplain bisa kami bantu.",
-        );
-        return res.json({ ok: true });
-      }
-
-      // cari transaksi
-      let trx = null;
-
-      if (trxId) {
-        trx = await getTrxStatus(trxId);
-      } else {
-        const list = await getTodayTrxByTarget(msisdn);
-        trx = list.find((t) => t.status === "PENDING") || list[0];
-      }
-
+      const trx = await getTrxStatus(trxId ? { trxId } : { msisdn });
       if (!trx) {
-        await waSend(
-          sessionName,
-          from,
-          "Transaksi belum kami temukan kak 🙏 Boleh dicek lagi datanya?",
-        );
+        await waSend(sessionName, from, "Transaksi tidak ditemukan kak 🙏");
         return res.json({ ok: true });
       }
 
-      // ✅ AMBIL CS SETELAH trx ADA
-      const cs = await getSupplierCS(trx.supplierCode);
+      const target = trx?.msisdn || msisdn || "-";
+      const status = trx?.status || "UNKNOWN";
 
-      if (!cs?.contact) {
-        await waSend(
-          sessionName,
-          from,
-          "Mohon maaf kak, CS supplier belum tersedia. Akan kami bantu manual 🙏",
-        );
+      const supplierText =
+        status === "SUCCESS"
+          ? `Mohon dibantu kak, transaksi ke ${target} status SUCCESS tapi user melaporkan belum masuk.`
+          : `Mohon dibantu kak, transaksi ke ${target} status ${status}.`;
+
+      if (!trx?.supplierCs) {
+        const warn =
+          "Saya sudah cek transaksinya kak, tapi kontak CS supplier belum tersedia. Mohon info admin ya 🙏";
+        await waSend(sessionName, from, warn);
+        await saveAIReply({ sessionId: session.id, message: warn, intent });
+        await resetSession(session.id);
         return res.json({ ok: true });
       }
 
-      const msgSupplier = `
-[COMPLAIN TRANSAKSI]
+      const result = await dispatchToSupplier(trx.supplierCs, supplierText);
+      console.log("result", result);
+      const userReply = result?.sent
+        ? "Siap kak 🙏 sudah saya follow up ke supplier. Mohon ditunggu ya."
+        : "Maaf kak 🙏 saya belum berhasil kirim follow up ke supplier. Boleh tunggu sebentar atau kirim ulang ID transaksinya?";
 
-ID: ${trx.id}
-Produk: ${trx.product}
-Tujuan: ${trx.target}
-Status: ${trx.status}
-`.trim();
+      await waSend(sessionName, from, userReply);
+      await saveAIReply({ sessionId: session.id, message: userReply, intent });
 
-      await waSend(sessionName, cs.contact, msgSupplier);
-
-      const replyUser =
-        ai.reply ||
-        `Komplain transaksi *${trx.id}* sudah kami teruskan ke CS supplier kak 🙏`;
-
-      await waSend(sessionName, from, replyUser);
-
-      await saveAIReply({
-        sessionId: session.id,
-        message: replyUser,
-        intent: "COMPLAIN",
-      });
-
-      await updateMemory(session.id, {
-        intent: "COMPLAIN",
-        context: `Komplain transaksi ${trx.id}`,
-      });
-
+      await resetSession(session.id);
       return res.json({ ok: true });
     }
 
-    // ================= CHAT NORMAL =================
+    // =========================
+    // B) CHECK_STATUS / COMPLAIN
+    // =========================
+    if (intent === "CHECK_STATUS" || intent === "COMPLAIN") {
+      // kalau belum ada trxId/msisdn → tanya dulu, lock WAITING_TRX
+      if (!trxId && !msisdn) {
+        const reply =
+          ai.reply?.trim() ||
+          "Siap kak 🙏 boleh kirim ID transaksi atau nomor tujuan ya?";
+        await waSend(sessionName, from, reply);
 
-    const reply = ai.reply || "Baik kak 🙏 Ada yang bisa kami bantu?";
+        await saveAIReply({ sessionId: session.id, message: reply, intent });
+
+        await setSession(session.id, {
+          flowState: FLOW.WAITING_TRX,
+          lastIntent: intent,
+          lastContext: "ASK_TRX",
+        });
+
+        return res.json({ ok: true });
+      }
+
+      // sudah ada trxId/msisdn → langsung cek status, jangan tanya lagi
+      await waSend(sessionName, from, "Siap kak 🙏 saya cek dulu ya...");
+
+      const trx = await getTrxStatus(trxId ? { trxId } : { msisdn });
+      if (!trx) {
+        await waSend(sessionName, from, "Transaksi tidak ditemukan kak 🙏");
+        return res.json({ ok: true });
+      }
+
+      const reply = trxReplyMinimal(trx);
+      await waSend(sessionName, from, reply);
+      await saveAIReply({ sessionId: session.id, message: reply, intent });
+
+      await resetSession(session.id);
+      return res.json({ ok: true });
+    }
+
+    // =========================
+    // C) CHAT normal
+    // =========================
+    const reply =
+      typeof ai.reply === "string" && ai.reply.trim()
+        ? ai.reply.trim()
+        : "Siap kak 😊 silakan ditanyakan.";
+
     await waSend(sessionName, from, reply);
     await saveAIReply({
       sessionId: session.id,
       message: reply,
-      intent: ai.intent || "OTHER",
+      intent: intent || "CHAT",
     });
+
+    // pastikan state balik CHAT
+    if (session.flowState !== FLOW.CHAT || session.lastIntent !== "CHAT") {
+      await setSession(session.id, {
+        flowState: FLOW.CHAT,
+        lastIntent: "CHAT",
+        lastContext: null,
+      });
+    }
 
     return res.json({ ok: true });
   } catch (err) {
-    console.error("WEBHOOK WA ERROR:", err.response?.data || err.message);
+    console.error("WA ERROR:", err.response?.data || err.message);
     return res.json({ ok: true });
   }
 });

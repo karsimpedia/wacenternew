@@ -38,7 +38,7 @@ enum ChatIntentType {
   CHECK_STATUS
   COMPLAIN
   FOLLOWUP
-
+  CANCEL_COMPLAIN
   UNKNOWN
 }
 
@@ -56,6 +56,16 @@ enum AIDecisionAction {
   IGNORE
 }
 
+
+enum ChatFlowState {
+  CHAT
+  COMPLAIN_REQUEST
+  CONFIRM_COMPLAIN
+  COMPLAIN_SENT
+  COMPLAIN_CANCELED
+}
+
+
 // =====================================================
 // CORE MODELS
 // =====================================================
@@ -67,6 +77,7 @@ model ChatSession {
   userKey       String         // no WA / username / uid web
 
   lastIntent    ChatIntentType @default(UNKNOWN)
+  flowState       ChatFlowState  @default(CHAT)
   lastContext   String?
   lastTarget    String?
   mood          ChatMood       @default(NORMAL)

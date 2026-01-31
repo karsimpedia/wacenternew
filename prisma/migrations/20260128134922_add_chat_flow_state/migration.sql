@@ -1,0 +1,8 @@
+-- CreateEnum
+CREATE TYPE "ChatFlowState" AS ENUM ('CHAT', 'COMPLAIN_REQUEST', 'CONFIRM_COMPLAIN', 'COMPLAIN_SENT', 'COMPLAIN_CANCELED');
+
+-- AlterEnum
+ALTER TYPE "ChatIntentType" ADD VALUE 'CANCEL_COMPLAIN';
+
+-- AlterTable
+ALTER TABLE "ChatSession" ADD COLUMN     "flowState" "ChatFlowState" NOT NULL DEFAULT 'CHAT';
