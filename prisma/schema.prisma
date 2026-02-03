@@ -1,0 +1,196 @@
+// =====================================================
+// CS AI - Standalone Schema (WhatsApp / Multi Channel)
+// =====================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================
+// ENUMS
+// =====================================================
+
+enum ChatChannel {
+  WA
+  TELEGRAM
+  WEB
+}
+
+enum ChatRole {
+  USER
+  AI
+  SYSTEM
+  AGENT
+}
+
+enum ChatMood {
+  NORMAL
+  KESAL
+  MARAH
+}
+enum ChatIntentType {
+  CHAT
+  CHECK_STATUS
+  COMPLAIN
+  FOLLOWUP
+  CANCEL_COMPLAIN
+  DEPOSIT_COMPLAIN
+  UNKNOWN
+}
+
+enum EscalationStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  CANCELED
+}
+
+enum AIDecisionAction {
+  REPLY
+  ASK
+  ESCALATE
+  IGNORE
+}
+
+
+enum ChatFlowState {
+  CHAT
+  COMPLAIN_REQUEST
+  CONFIRM_COMPLAIN
+  COMPLAIN_SENT
+  COMPLAIN_CANCELED
+}
+
+
+// =====================================================
+// CORE MODELS
+// =====================================================
+
+model ChatSession {
+  id            String         @id @default(uuid())
+
+  channel       ChatChannel    @default(WA)
+  userKey       String         // no WA / username / uid web
+
+  lastIntent    ChatIntentType @default(UNKNOWN)
+  flowState       ChatFlowState  @default(CHAT)
+  lastContext   String?
+  lastTarget    String?
+  mood          ChatMood       @default(NORMAL)
+
+  aiEnabled     Boolean        @default(true)
+  escalated     Boolean        @default(false)
+
+  lastMessageAt DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  // relations
+  messages      ChatMessage[]
+  summary       ChatSummary?
+  intents       ChatIntent[]
+  escalations   ChatEscalation[]
+  decisions     AIDecision[]
+
+  @@unique([channel, userKey])
+  @@index([userKey])
+  @@index([lastMessageAt])
+}
+
+model ChatMessage {
+  id          String        @id @default(uuid())
+  sessionId   String
+
+  role        ChatRole
+  message     String
+  intent      ChatIntentType @default(UNKNOWN)
+
+  // idempotency & trace
+  externalId  String?       // messageId WA / Telegram
+  rawPayload  Json?
+
+  createdAt   DateTime      @default(now())
+
+  session     ChatSession   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, externalId])
+  @@index([sessionId, createdAt])
+  @@index([role])
+}
+
+model ChatSummary {
+  id          String      @id @default(uuid())
+  sessionId   String     @unique
+
+  summary     String     // long memory (ringkasan historis)
+  short       String?    // ultra short memory (hemat token)
+
+  lastWindow  DateTime?  // batas waktu window ringkasan
+
+  updatedAt   DateTime   @updatedAt
+  createdAt   DateTime   @default(now())
+
+  session     ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+}
+
+model ChatIntent {
+  id          String         @id @default(uuid())
+  sessionId   String
+
+  intent      ChatIntentType
+  confidence  Float          @default(0)
+  source      String?        // rule | ai | agent
+
+  createdAt   DateTime       @default(now())
+
+  session     ChatSession    @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([intent])
+}
+
+// =====================================================
+// AI & ESCALATION
+// =====================================================
+
+model AIDecision {
+  id          String            @id @default(uuid())
+  sessionId   String
+
+  action      AIDecisionAction
+  reason      String?
+  promptHash  String?           // untuk debug / cache
+  confidence  Float             @default(0)
+
+  createdAt   DateTime          @default(now())
+
+  session     ChatSession       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId, createdAt])
+  @@index([action])
+}
+
+model ChatEscalation {
+  id           String           @id @default(uuid())
+  sessionId    String
+
+  status       EscalationStatus @default(OPEN)
+  reason       String
+
+  assignedTo   String?          // agent/admin id
+  notes        String?
+
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+  resolvedAt   DateTime?
+
+  session      ChatSession      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([sessionId])
+}
