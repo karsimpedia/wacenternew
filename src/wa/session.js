@@ -2,6 +2,7 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   jidNormalizedUser,
+  fetchLatestBaileysVersion
 } from "@whiskeysockets/baileys";
 
 import pino from "pino";
@@ -53,8 +54,9 @@ export default class WASession {
 
   async init() {
     const { state, saveCreds } = await useMultiFileAuthState(`./auth/${this.sessionId}`);
-
+  const { version } = await fetchLatestBaileysVersion();
     this.sock = makeWASocket({
+      version,
       auth: state,
       markOnlineOnConnect: true,
       syncFullHistory: false, 
