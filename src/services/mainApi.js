@@ -1,14 +1,23 @@
 // src/services/mainApi.js
 import axios from "axios";
 import crypto from "crypto";
-import * as dummy from "./mainApi.dummy.js";
 import qs from "qs";
+import * as dummy from "./mainApi.dummy.js";
+
 const useDummy = String(process.env.USE_DUMMY_MAIN_API) === "true";
 
+function compactParams(obj = {}) {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([, v]) => v !== undefined && v !== null && v !== "")
+  );
+}
+
 function buildOriginalUrl(path, params) {
-  const q = params
-    ? qs.stringify(params, { addQueryPrefix: true, arrayFormat: "repeat" })
-    : "";
+  const cleanParams = compactParams(params);
+  const q = qs.stringify(cleanParams, {
+    addQueryPrefix: true,
+    arrayFormat: "repeat",
+  });
   return `${path}${q}`;
 }
 
@@ -27,51 +36,47 @@ function signCsAi({ method, originalUrl }) {
   };
 }
 
-// ======================================================
-// AXIOS INSTANCE (NO BEARER)
-// ======================================================
 const api = axios.create({
   baseURL: process.env.MAIN_API_URL,
   timeout: 8000,
 });
 
-// ======================================================
-// REAL IMPLEMENTATION
-// ======================================================
-
-// GET /api/trx/cekstatus
 async function real_getTrxStatus({ trxId, invoiceId, msisdn }) {
   const path = "/api/trx/cekstatus";
-  const params = { trxId, invoiceId, msisdn };
+  const params = compactParams({ trxId, invoiceId, msisdn });
+
+  if (!params.trxId && !params.invoiceId && !params.msisdn) {
+    return null;
+  }
 
   const originalUrl = buildOriginalUrl(path, params);
 
-  const r = await api.get(path, {
-    params: { trxId, invoiceId, msisdn },
-    headers: signCsAi({
-      method: "GET",
-      originalUrl,
-    }),
-  });
+  try {
+    const r = await api.get(path, {
+      params,
+      headers: signCsAi({
+        method: "GET",
+        originalUrl,
+      }),
+    });
 
-  return r.data?.transaction || null;
+    return r.data?.transaction || null;
+  } catch (e) {
+    console.error("[getTrxStatus]", e?.response?.data || e.message);
+    return null;
+  }
 }
 
-// Ambil CS Supplier dari transaksi
 async function real_getSupplierCS({ trxId, invoiceId, msisdn }) {
   const trx = await real_getTrxStatus({ trxId, invoiceId, msisdn });
   return trx?.supplierCs || null;
 }
 
-// Shortcut: transaksi terbaru by msisdn
 async function real_getLatestTrxByTarget(msisdn) {
   if (!msisdn) return null;
   return real_getTrxStatus({ msisdn });
 }
 
-// ======================================================
-// EXPORT SWITCH
-// ======================================================
 export const getTrxStatus = useDummy ? dummy.getTrxStatus : real_getTrxStatus;
 
 export const getSupplierCS = useDummy
@@ -83,6 +88,8 @@ export const getLatestTrxByTarget = useDummy
   : real_getLatestTrxByTarget;
 
 export const resendTrx = async (id) => {
+  if (!id) return false;
+
   try {
     const path = `/api/trx/resend/${id}`;
 
@@ -94,7 +101,7 @@ export const resendTrx = async (id) => {
           method: "POST",
           originalUrl: path,
         }),
-      }
+      },
     );
 
     return r.data?.ok === true;
