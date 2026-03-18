@@ -1,3 +1,5 @@
+//src/wa/session.js
+
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
@@ -10,6 +12,7 @@ import pino from "pino";
 import qrcode from "qrcode-terminal";
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import mime from "mime-types";
 import axios from "axios";
 
@@ -58,6 +61,31 @@ function ensureDir(dirPath) {
 function getFileExtensionFromMime(mimetype = "", fallback = "bin") {
   const ext = mime.extension(mimetype);
   return ext || fallback;
+}
+
+function saveIncomingMedia({
+  buffer,
+  mimetype = "application/octet-stream",
+  sessionId = "default",
+  type = "file",
+}) {
+  const ext = getFileExtensionFromMime(mimetype, type === "image" ? "jpg" : "bin");
+  const baseDir = path.join(process.cwd(), "uploads", "wa", sessionId, type);
+
+  ensureDir(baseDir);
+
+  const fileName = `${Date.now()}-${crypto.randomBytes(6).toString("hex")}.${ext}`;
+  const fullPath = path.join(baseDir, fileName);
+  const relativePath = `/uploads/wa/${sessionId}/${type}/${fileName}`;
+
+  fs.writeFileSync(fullPath, buffer);
+
+  return {
+    fileName,
+    fullPath,
+    relativePath,
+    mimetype,
+  };
 }
 
 // ===============================
@@ -153,8 +181,10 @@ export default class WASession {
 
           const messageType = getMessageType(msg);
           const text = extractTextMessage(msg);
+
+          let imagePath = null;
+          let imageRelativePath = null;
           let imageUrl = null;
-          let imageBase64 = null;
           let mediaMeta = null;
 
           // ===============================
@@ -175,12 +205,24 @@ export default class WASession {
               if (buffer) {
                 const mimetype =
                   msg.message?.imageMessage?.mimetype || "image/jpeg";
-                imageBase64 = `data:${mimetype};base64,${buffer.toString("base64")}`;
+
+                const saved = saveIncomingMedia({
+                  buffer,
+                  mimetype,
+                  sessionId: this.sessionId,
+                  type: "image",
+                });
+
+                imagePath = saved.fullPath;
+                imageRelativePath = saved.relativePath;
 
                 mediaMeta = {
                   type: "image",
                   mimetype,
                   caption: msg.message?.imageMessage?.caption || "",
+                  fileName: saved.fileName,
+                  path: saved.fullPath,
+                  relativePath: saved.relativePath,
                 };
               }
             } catch (err) {
@@ -189,12 +231,12 @@ export default class WASession {
           }
 
           // Bisa diteruskan meskipun tanpa text, asalkan ada gambar
-          if (!text && !imageBase64 && !imageUrl) continue;
+          if (!text && !imagePath && !imageUrl) continue;
 
           console.log("📩 PESAN USER:", rawJid, "→", from, {
             type: messageType,
             text,
-            hasImage: !!imageBase64 || !!imageUrl,
+            hasImage: !!imagePath || !!imageUrl,
           });
 
           await axios.post(
@@ -206,7 +248,8 @@ export default class WASession {
               messageId: msg.key?.id || null,
               messageType,
               imageUrl,
-              imageBase64,
+              imagePath,
+              imageRelativePath,
               mediaMeta,
               raw: {
                 pushName: msg.pushName || null,

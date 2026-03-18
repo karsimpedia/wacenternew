@@ -1,6 +1,8 @@
 // src/openAi/manager.js
 import "dotenv/config";
 import express from "express";
+import fs from "fs";
+import mime from "mime-types";
 import OpenAI from "openai";
 
 import { systemPrompt, replyPrompt } from "./csPrompt.js";
@@ -82,6 +84,34 @@ function isNonEmptyString(v) {
 
 function isDataImageUrl(v = "") {
   return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(v || "").trim());
+}
+
+function normalizeImageUrl(v) {
+  if (!isNonEmptyString(v)) return null;
+  const s = String(v).trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
+function normalizeImagePath(v) {
+  if (!isNonEmptyString(v)) return null;
+  return String(v).trim();
+}
+
+function imagePathToDataUrl(imagePath) {
+  try {
+    const normalizedPath = normalizeImagePath(imagePath);
+    if (!normalizedPath) return null;
+    if (!fs.existsSync(normalizedPath)) return null;
+
+    const buffer = fs.readFileSync(normalizedPath);
+    const contentType = mime.lookup(normalizedPath) || "image/jpeg";
+
+    return `data:${contentType};base64,${buffer.toString("base64")}`;
+  } catch (err) {
+    console.warn("imagePathToDataUrl failed:", err.message);
+    return null;
+  }
 }
 
 function buildMemoryMessages(mem = {}) {
@@ -193,7 +223,7 @@ function buildMemoryText(mem = {}) {
   return parts.join("\n\n");
 }
 
-function buildUserInput({ message = "", imageUrl = null, imageBase64 = null }) {
+function buildUserInput({ message = "", imageUrl = null, imageDataUrl = null }) {
   const content = [];
 
   if (isNonEmptyString(message)) {
@@ -211,10 +241,10 @@ function buildUserInput({ message = "", imageUrl = null, imageBase64 = null }) {
     });
   }
 
-  if (isNonEmptyString(imageBase64) && isDataImageUrl(imageBase64)) {
+  if (isNonEmptyString(imageDataUrl) && isDataImageUrl(imageDataUrl)) {
     content.push({
       type: "input_image",
-      image_url: imageBase64.trim(),
+      image_url: imageDataUrl.trim(),
       detail: "auto",
     });
   }
@@ -358,27 +388,39 @@ function buildFallbackReply({
 
 // =====================================================
 // /cs/decide
-// Support text + image
+// Support text + image via imageUrl / imagePath
 // =====================================================
 
 router.post("/cs/decide", async (req, res) => {
   const sessionId = String(req.body.sessionId || "").trim();
   const userId = String(req.body.userId || "").trim();
   const message = String(req.body.message || "").trim();
-  const imageUrl = isNonEmptyString(req.body.imageUrl) ? String(req.body.imageUrl).trim() : null;
-  const imageBase64 = isNonEmptyString(req.body.imageBase64)
-    ? String(req.body.imageBase64).trim()
-    : null;
+  const imageUrl = normalizeImageUrl(req.body.imageUrl);
+  const imagePath = normalizeImagePath(req.body.imagePath);
+
+  let imageDataUrl = null;
+
+  if (isNonEmptyString(req.body.imageBase64)) {
+    const maybeDataUrl = String(req.body.imageBase64).trim();
+    if (isDataImageUrl(maybeDataUrl)) {
+      imageDataUrl = maybeDataUrl;
+    }
+  }
+
+  if (!imageDataUrl && imagePath) {
+    imageDataUrl = imagePathToDataUrl(imagePath);
+  }
 
   console.log("/cs/decide", {
     sessionId,
     userId,
     message,
     hasImageUrl: !!imageUrl,
-    hasImageBase64: !!imageBase64,
+    hasImagePath: !!imagePath,
+    hasImageDataUrl: !!imageDataUrl,
   });
 
-  if (!sessionId || !userId || (!message && !imageUrl && !imageBase64)) {
+  if (!sessionId || !userId || (!message && !imageUrl && !imageDataUrl)) {
     return res.status(400).json({
       ok: false,
       message: "Bad request",
@@ -392,7 +434,11 @@ router.post("/cs/decide", async (req, res) => {
     console.log("decide-memory", mem);
 
     const memoryText = buildMemoryText(mem);
-    const userInput = buildUserInput({ message, imageUrl, imageBase64 });
+    const userInput = buildUserInput({
+      message,
+      imageUrl,
+      imageDataUrl,
+    });
 
     const input = [
       {

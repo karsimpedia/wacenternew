@@ -101,10 +101,6 @@ function isNonEmptyString(v) {
   return typeof v === "string" && v.trim().length > 0;
 }
 
-function isDataImageUrl(v = "") {
-  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(v || "").trim());
-}
-
 function normalizeImageUrl(v) {
   if (!isNonEmptyString(v)) return null;
   const s = String(v).trim();
@@ -112,18 +108,22 @@ function normalizeImageUrl(v) {
   return null;
 }
 
-function normalizeImageBase64(v) {
+function normalizeImagePath(v) {
   if (!isNonEmptyString(v)) return null;
-  const s = String(v).trim();
-  return isDataImageUrl(s) ? s : null;
+  return String(v).trim();
+}
+
+function normalizeRelativePath(v) {
+  if (!isNonEmptyString(v)) return null;
+  return String(v).trim();
 }
 
 /**
- * Ambil gambar dari berbagai kemungkinan payload gateway WA.
- * Kamu bisa sesuaikan lagi kalau format payload gateway kamu sudah pasti.
+ * Ambil gambar dari payload webhook internal WA.
+ * Versi baru utamanya pakai imagePath, bukan base64.
  */
 function extractImagePayload(body = {}) {
-  const directImageUrl =
+  const imageUrl =
     normalizeImageUrl(body.imageUrl) ||
     normalizeImageUrl(body.mediaUrl) ||
     normalizeImageUrl(body.url) ||
@@ -132,21 +132,28 @@ function extractImagePayload(body = {}) {
     normalizeImageUrl(body.message?.imageUrl) ||
     normalizeImageUrl(body.message?.mediaUrl) ||
     normalizeImageUrl(body.data?.imageUrl) ||
+    normalizeImageUrl(body.mediaMeta?.url) ||
     null;
 
-  const directImageBase64 =
-    normalizeImageBase64(body.imageBase64) ||
-    normalizeImageBase64(body.base64) ||
-    normalizeImageBase64(body.image?.base64) ||
-    normalizeImageBase64(body.media?.base64) ||
-    normalizeImageBase64(body.message?.imageBase64) ||
-    normalizeImageBase64(body.data?.imageBase64) ||
+  const imagePath =
+    normalizeImagePath(body.imagePath) ||
+    normalizeImagePath(body.image?.path) ||
+    normalizeImagePath(body.media?.path) ||
+    normalizeImagePath(body.message?.imagePath) ||
+    normalizeImagePath(body.data?.imagePath) ||
+    normalizeImagePath(body.mediaMeta?.path) ||
+    null;
+
+  const imageRelativePath =
+    normalizeRelativePath(body.imageRelativePath) ||
+    normalizeRelativePath(body.mediaMeta?.relativePath) ||
     null;
 
   return {
-    imageUrl: directImageUrl,
-    imageBase64: directImageBase64,
-    hasImage: !!directImageUrl || !!directImageBase64,
+    imageUrl,
+    imagePath,
+    imageRelativePath,
+    hasImage: !!imageUrl || !!imagePath,
   };
 }
 
@@ -177,7 +184,7 @@ async function callAIDecide({
   userId,
   message,
   imageUrl = null,
-  imageBase64 = null,
+  imagePath = null,
 }) {
   const resp = await axios.post(
     AI_DECIDE_URL,
@@ -186,7 +193,7 @@ async function callAIDecide({
       userId,
       message,
       imageUrl,
-      imageBase64,
+      imagePath,
     },
     { timeout: 20000 },
   );
@@ -281,6 +288,10 @@ function buildReplyExtraContext({
   session = {},
   hasImage = false,
   imageUrl = null,
+  imagePath = null,
+  imageRelativePath = null,
+  mediaMeta = null,
+  messageType = null,
 }) {
   return {
     topic: ai?.topic || null,
@@ -288,6 +299,10 @@ function buildReplyExtraContext({
     aiData: ai?.data || {},
     hasImage,
     imageUrl: imageUrl || null,
+    imagePath: imagePath || null,
+    imageRelativePath: imageRelativePath || null,
+    mediaMeta: mediaMeta || null,
+    messageType: messageType || null,
     flowState: session?.flowState || null,
     lastIntent: session?.lastIntent || null,
     lastContext: session?.lastContext || null,
@@ -304,8 +319,14 @@ router.post("/", async (req, res) => {
   const from = String(req.body.from || "").trim();
   const userText = String(req.body.message || req.body.text || "").trim();
   const externalId = req.body.messageId ? String(req.body.messageId) : null;
+  const messageType = String(req.body.messageType || "").trim() || null;
+  const mediaMeta =
+    req.body.mediaMeta && typeof req.body.mediaMeta === "object"
+      ? req.body.mediaMeta
+      : null;
 
-  const { imageUrl, imageBase64, hasImage } = extractImagePayload(req.body);
+  const { imageUrl, imagePath, imageRelativePath, hasImage } =
+    extractImagePayload(req.body);
 
   if (!from || (!userText && !hasImage)) {
     return res.json({ ok: true });
@@ -334,7 +355,7 @@ router.post("/", async (req, res) => {
       userId: from,
       message: userText,
       imageUrl,
-      imageBase64,
+      imagePath,
     });
 
     const intent = ai.intent;
@@ -353,7 +374,13 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
-        rawPayload: { topic, aiData: ai.data || {} },
+        rawPayload: {
+          topic,
+          aiData: ai.data || {},
+          hasImage,
+          imagePath,
+          imageRelativePath,
+        },
       });
 
       await resetSession(session.id);
@@ -380,6 +407,10 @@ router.post("/", async (req, res) => {
             session,
             hasImage,
             imageUrl,
+            imagePath,
+            imageRelativePath,
+            mediaMeta,
+            messageType,
           }),
         })) ||
         ai.reply ||
@@ -391,7 +422,13 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
-        rawPayload: { topic, depositData },
+        rawPayload: {
+          topic,
+          depositData,
+          hasImage,
+          imagePath,
+          imageRelativePath,
+        },
       });
 
       await updateSession(session.id, {
@@ -423,6 +460,10 @@ router.post("/", async (req, res) => {
               session,
               hasImage,
               imageUrl,
+              imagePath,
+              imageRelativePath,
+              mediaMeta,
+              messageType,
             }),
           })) ||
           ai.reply ||
@@ -434,7 +475,13 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: askReply,
           intent,
-          rawPayload: { topic, aiData: ai.data || {}, hasImage },
+          rawPayload: {
+            topic,
+            aiData: ai.data || {},
+            hasImage,
+            imagePath,
+            imageRelativePath,
+          },
         });
 
         await updateSession(session.id, {
@@ -472,6 +519,10 @@ router.post("/", async (req, res) => {
               session,
               hasImage,
               imageUrl,
+              imagePath,
+              imageRelativePath,
+              mediaMeta,
+              messageType,
             }),
           })) ||
           "Transaksi tidak ditemukan kak 🙏";
@@ -482,7 +533,13 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: reply,
           intent,
-          rawPayload: { topic, lookup },
+          rawPayload: {
+            topic,
+            lookup,
+            hasImage,
+            imagePath,
+            imageRelativePath,
+          },
         });
 
         await resetSession(session.id);
@@ -525,6 +582,10 @@ router.post("/", async (req, res) => {
                 session,
                 hasImage,
                 imageUrl,
+                imagePath,
+                imageRelativePath,
+                mediaMeta,
+                messageType,
               }),
             })) ||
             "Saya sudah cek transaksinya kak, tapi kontak CS supplier belum tersedia 🙏";
@@ -569,6 +630,10 @@ router.post("/", async (req, res) => {
               session,
               hasImage,
               imageUrl,
+              imagePath,
+              imageRelativePath,
+              mediaMeta,
+              messageType,
             }),
           })) ||
           (result?.sent
@@ -626,6 +691,10 @@ router.post("/", async (req, res) => {
             session,
             hasImage,
             imageUrl,
+            imagePath,
+            imageRelativePath,
+            mediaMeta,
+            messageType,
           }),
         })) || "Siap kak 🙏 sedang saya bantu cek ya.";
 
@@ -658,6 +727,10 @@ router.post("/", async (req, res) => {
           session,
           hasImage,
           imageUrl,
+          imagePath,
+          imageRelativePath,
+          mediaMeta,
+          messageType,
         }),
       })) ||
       ai.reply ||
@@ -669,7 +742,13 @@ router.post("/", async (req, res) => {
       sessionId: session.id,
       message: chatReply,
       intent: "CHAT",
-      rawPayload: { topic, aiData: ai.data || {}, hasImage },
+      rawPayload: {
+        topic,
+        aiData: ai.data || {},
+        hasImage,
+        imagePath,
+        imageRelativePath,
+      },
     });
 
     await updateSession(session.id, {
