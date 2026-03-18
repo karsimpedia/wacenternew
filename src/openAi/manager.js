@@ -304,8 +304,7 @@ router.post("/cs/decide", async (req, res) => {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      temperature: 0.1,
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",      
       response_format: { type: "json_object" },
       messages,
     });
@@ -431,8 +430,7 @@ router.post("/cs/reply", async (req, res) => {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      temperature: 0.3,
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",      
       response_format: { type: "json_object" },
       messages,
     });
