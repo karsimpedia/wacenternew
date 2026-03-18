@@ -13,6 +13,27 @@ const router = express.Router();
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // =====================================================
+// Config
+// =====================================================
+
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const DECIDE_MODEL = process.env.OPENAI_DECIDE_MODEL || DEFAULT_MODEL;
+const REPLY_MODEL = process.env.OPENAI_REPLY_MODEL || DEFAULT_MODEL;
+
+const DECIDE_TIMEOUT_TEXT_MS = Number(
+  process.env.OPENAI_DECIDE_TIMEOUT_TEXT_MS || 20000,
+);
+const DECIDE_TIMEOUT_IMAGE_MS = Number(
+  process.env.OPENAI_DECIDE_TIMEOUT_IMAGE_MS || 45000,
+);
+const REPLY_TIMEOUT_CHAT_MS = Number(
+  process.env.OPENAI_REPLY_TIMEOUT_CHAT_MS || 15000,
+);
+const REPLY_TIMEOUT_ACTION_MS = Number(
+  process.env.OPENAI_REPLY_TIMEOUT_ACTION_MS || 25000,
+);
+
+// =====================================================
 // Helpers
 // =====================================================
 
@@ -96,6 +117,40 @@ function normalizeImageUrl(v) {
 function normalizeImagePath(v) {
   if (!isNonEmptyString(v)) return null;
   return String(v).trim();
+}
+
+function hasImageInput({ imageUrl = null, imagePath = null, imageDataUrl = null }) {
+  return !!imageUrl || !!imagePath || !!imageDataUrl;
+}
+
+function getDecideTimeout({ hasImage = false }) {
+  return hasImage ? DECIDE_TIMEOUT_IMAGE_MS : DECIDE_TIMEOUT_TEXT_MS;
+}
+
+function getReplyTimeout(intent = "CHAT") {
+  const upperIntent = String(intent || "CHAT").trim().toUpperCase();
+
+  if (
+    ["FOLLOWUP", "CHECK_STATUS", "COMPLAIN", "DEPOSIT_COMPLAIN"].includes(
+      upperIntent,
+    )
+  ) {
+    return REPLY_TIMEOUT_ACTION_MS;
+  }
+
+  return REPLY_TIMEOUT_CHAT_MS;
+}
+
+function isTimeoutError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  const message = String(err?.message || "").toLowerCase();
+
+  return (
+    code === "ECONNABORTED" ||
+    code === "ETIMEDOUT" ||
+    message.includes("timeout") ||
+    message.includes("timed out")
+  );
 }
 
 function imagePathToDataUrl(imagePath) {
@@ -386,6 +441,59 @@ function buildFallbackReply({
   return "Siap kak, sedang kami bantu cek ya 🙏";
 }
 
+function buildFallbackDecision() {
+  return {
+    intent: "CHAT",
+    topic: null,
+    trxId: null,
+    invoiceId: null,
+    msisdn: null,
+    ask: null,
+    reply: null,
+    data: {},
+    confidence: 0,
+    needsTransactionLookup: false,
+  };
+}
+
+async function createDecisionResponse({
+  input,
+  model,
+  timeout,
+}) {
+  return openai.responses.create(
+    {
+      model,
+      input,
+      text: {
+        format: {
+          type: "json_object",
+        },
+      },
+    },
+    {
+      timeout,
+    },
+  );
+}
+
+async function createReplyCompletion({
+  model,
+  messages,
+  timeout,
+}) {
+  return openai.chat.completions.create(
+    {
+      model,
+      response_format: { type: "json_object" },
+      messages,
+    },
+    {
+      timeout,
+    },
+  );
+}
+
 // =====================================================
 // /cs/decide
 // Support text + image via imageUrl / imagePath
@@ -410,6 +518,12 @@ router.post("/cs/decide", async (req, res) => {
   if (!imageDataUrl && imagePath) {
     imageDataUrl = imagePathToDataUrl(imagePath);
   }
+
+  const hasImage = hasImageInput({
+    imageUrl,
+    imagePath,
+    imageDataUrl,
+  });
 
   console.log("/cs/decide", {
     sessionId,
@@ -456,15 +570,16 @@ router.post("/cs/decide", async (req, res) => {
 
     input.push(userInput);
 
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    const timeout = getDecideTimeout({ hasImage });
+    const startedAt = Date.now();
+
+    const response = await createDecisionResponse({
+      model: DECIDE_MODEL,
       input,
-      text: {
-        format: {
-          type: "json_object",
-        },
-      },
+      timeout,
     });
+
+    console.log("[OPENAI /cs/decide] duration:", Date.now() - startedAt, "ms");
 
     const raw = response.output_text || "";
     console.log("DECIDE RAW", raw);
@@ -489,18 +604,12 @@ router.post("/cs/decide", async (req, res) => {
       err?.response?.data || err?.message || err,
     );
 
-    const fallback = {
-      intent: "CHAT",
-      topic: null,
-      trxId: null,
-      invoiceId: null,
-      msisdn: null,
-      ask: null,
-      reply: null,
-      data: {},
-      confidence: 0,
-      needsTransactionLookup: false,
-    };
+    const fallback = buildFallbackDecision();
+
+    if (isTimeoutError(err) && hasImage) {
+      fallback.reply =
+        "Maaf kak, foto sedang diproses lebih lama dari biasanya. Bisa kirim ulang foto yang lebih jelas, atau kirim invoice / ID transaksi / nomor tujuan ya.";
+    }
 
     try {
       await saveAIDecision({
@@ -590,11 +699,16 @@ router.post("/cs/reply", async (req, res) => {
       },
     ];
 
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      response_format: { type: "json_object" },
+    const timeout = getReplyTimeout(intent);
+    const startedAt = Date.now();
+
+    const completion = await createReplyCompletion({
+      model: REPLY_MODEL,
       messages,
+      timeout,
     });
+
+    console.log("[OPENAI /cs/reply] duration:", Date.now() - startedAt, "ms");
 
     const raw = completion.choices?.[0]?.message?.content || "";
     console.log("REPLY RAW", raw);

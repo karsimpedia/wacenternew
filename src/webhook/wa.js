@@ -37,14 +37,6 @@ function verifySecret(req) {
   );
 }
 
-async function waSend(sessionName, to, message) {
-  await axios.post(
-    `${WA_BASE}/wa/${sessionName}/send`,
-    { phone: to, message },
-    { timeout: 8000 },
-  );
-}
-
 function isGeneralChat(text = "") {
   const t = String(text).trim().toLowerCase();
   return (
@@ -118,6 +110,40 @@ function normalizeRelativePath(v) {
   return String(v).trim();
 }
 
+function isImageMessage({ hasImage = false, messageType = null, userText = "" }) {
+  if (hasImage) return true;
+
+  const mt = String(messageType || "").toLowerCase();
+  if (mt.includes("image") || mt.includes("media")) return true;
+
+  const text = String(userText || "");
+  if (text.includes("[IMAGE]")) return true;
+
+  return false;
+}
+
+function getAIDecideTimeout({ hasImage = false }) {
+  return hasImage ? 45000 : 20000;
+}
+
+function getAIReplyTimeout({ hasImage = false, intent = "CHAT" }) {
+  if (hasImage) return 45000;
+
+  if (
+    ["FOLLOWUP", "CHECK_STATUS", "COMPLAIN", "DEPOSIT_COMPLAIN"].includes(
+      String(intent || "").toUpperCase(),
+    )
+  ) {
+    return 25000;
+  }
+
+  return 15000;
+}
+
+function getWASendTimeout({ hasImage = false }) {
+  return hasImage ? 15000 : 10000;
+}
+
 /**
  * Ambil gambar dari payload webhook internal WA.
  * Versi baru utamanya pakai imagePath, bukan base64.
@@ -157,6 +183,16 @@ function extractImagePayload(body = {}) {
   };
 }
 
+async function waSend(sessionName, to, message, opts = {}) {
+  const timeout = Number(opts.timeout || 10000);
+
+  await axios.post(
+    `${WA_BASE}/wa/${sessionName}/send`,
+    { phone: to, message },
+    { timeout },
+  );
+}
+
 async function sendAndSaveReply({
   sessionName,
   to,
@@ -164,11 +200,12 @@ async function sendAndSaveReply({
   message,
   intent = "CHAT",
   rawPayload = null,
+  waTimeout = 10000,
 }) {
   const reply = String(message || "").trim();
   if (!reply) return null;
 
-  await waSend(sessionName, to, reply);
+  await waSend(sessionName, to, reply, { timeout: waTimeout });
   await saveAIReply({
     sessionId,
     message: reply,
@@ -185,7 +222,11 @@ async function callAIDecide({
   message,
   imageUrl = null,
   imagePath = null,
+  hasImage = false,
 }) {
+  const timeout = getAIDecideTimeout({ hasImage });
+  const startedAt = Date.now();
+
   const resp = await axios.post(
     AI_DECIDE_URL,
     {
@@ -195,8 +236,10 @@ async function callAIDecide({
       imageUrl,
       imagePath,
     },
-    { timeout: 20000 },
+    { timeout },
   );
+
+  console.log("[AI_DECIDE] duration:", Date.now() - startedAt, "ms");
 
   const data = resp.data?.data || resp.data || {};
 
@@ -229,8 +272,12 @@ async function callAIReply({
   transaction = null,
   actionTaken = null,
   extraContext = null,
+  hasImage = false,
 }) {
   try {
+    const timeout = getAIReplyTimeout({ hasImage, intent });
+    const startedAt = Date.now();
+
     const resp = await axios.post(
       AI_REPLY_URL,
       {
@@ -244,7 +291,15 @@ async function callAIReply({
         actionTaken,
         extraContext,
       },
-      { timeout: 15000 },
+      { timeout },
+    );
+
+    console.log(
+      "[AI_REPLY] intent:",
+      intent,
+      "duration:",
+      Date.now() - startedAt,
+      "ms",
     );
 
     const data = resp.data?.data || resp.data || {};
@@ -252,6 +307,15 @@ async function callAIReply({
     return reply || null;
   } catch (err) {
     console.error("AI_REPLY ERROR:", err.response?.data || err.message);
+
+    if (err.code === "ECONNABORTED") {
+      if (hasImage) {
+        return "Maaf kak 🙏 foto sedang diproses lebih lama dari biasanya. Bisa kirim ulang foto yang lebih jelas, atau kirim invoice / ID transaksi / nomor tujuan ya.";
+      }
+
+      return null;
+    }
+
     return null;
   }
 }
@@ -328,6 +392,8 @@ router.post("/", async (req, res) => {
   const { imageUrl, imagePath, imageRelativePath, hasImage } =
     extractImagePayload(req.body);
 
+  const imageMessage = isImageMessage({ hasImage, messageType, userText });
+
   if (!from || (!userText && !hasImage)) {
     return res.json({ ok: true });
   }
@@ -346,7 +412,11 @@ router.post("/", async (req, res) => {
       console.warn("[WA] saveIncomingMessage skipped:", err.code || err.message);
     }
 
-    if (session.flowState === FLOW.WAITING_TRX && isGeneralChat(userText)) {
+    if (
+      session.flowState === FLOW.WAITING_TRX &&
+      !imageMessage &&
+      isGeneralChat(userText)
+    ) {
       await resetSession(session.id);
     }
 
@@ -356,10 +426,12 @@ router.post("/", async (req, res) => {
       message: userText,
       imageUrl,
       imagePath,
+      hasImage: imageMessage,
     });
 
     const intent = ai.intent;
     const topic = ai.topic;
+    const waTimeout = getWASendTimeout({ hasImage: imageMessage });
 
     // =========================
     // 1) CANCEL COMPLAIN
@@ -374,6 +446,7 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
+        waTimeout,
         rawPayload: {
           topic,
           aiData: ai.data || {},
@@ -412,6 +485,7 @@ router.post("/", async (req, res) => {
             mediaMeta,
             messageType,
           }),
+          hasImage: imageMessage,
         })) ||
         ai.reply ||
         "Siap kak 🙏 mohon kirim data depositnya ya: nominal transfer, bank tujuan deposit, ID reseller, dan waktu transfer jika ada.";
@@ -422,6 +496,7 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
+        waTimeout,
         rawPayload: {
           topic,
           depositData,
@@ -465,6 +540,7 @@ router.post("/", async (req, res) => {
               mediaMeta,
               messageType,
             }),
+            hasImage: imageMessage,
           })) ||
           ai.reply ||
           "Boleh kirim ID transaksi, invoice, atau nomor tujuan ya kak 🙏";
@@ -475,6 +551,7 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: askReply,
           intent,
+          waTimeout,
           rawPayload: {
             topic,
             aiData: ai.data || {},
@@ -524,6 +601,7 @@ router.post("/", async (req, res) => {
               mediaMeta,
               messageType,
             }),
+            hasImage: imageMessage,
           })) ||
           "Transaksi tidak ditemukan kak 🙏";
 
@@ -533,6 +611,7 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: reply,
           intent,
+          waTimeout,
           rawPayload: {
             topic,
             lookup,
@@ -587,6 +666,7 @@ router.post("/", async (req, res) => {
                 mediaMeta,
                 messageType,
               }),
+              hasImage: imageMessage,
             })) ||
             "Saya sudah cek transaksinya kak, tapi kontak CS supplier belum tersedia 🙏";
 
@@ -596,6 +676,7 @@ router.post("/", async (req, res) => {
             sessionId: session.id,
             message: reply,
             intent,
+            waTimeout,
           });
 
           await resetSession(session.id);
@@ -635,6 +716,7 @@ router.post("/", async (req, res) => {
               mediaMeta,
               messageType,
             }),
+            hasImage: imageMessage,
           })) ||
           (result?.sent
             ? "Siap kak 🙏 sudah saya follow up ke supplier. Mohon ditunggu ya."
@@ -646,6 +728,7 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: reply,
           intent,
+          waTimeout,
         });
 
         await resetSession(session.id);
@@ -696,6 +779,7 @@ router.post("/", async (req, res) => {
             mediaMeta,
             messageType,
           }),
+          hasImage: imageMessage,
         })) || "Siap kak 🙏 sedang saya bantu cek ya.";
 
       await sendAndSaveReply({
@@ -704,6 +788,7 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
+        waTimeout,
       });
 
       await resetSession(session.id);
@@ -732,6 +817,7 @@ router.post("/", async (req, res) => {
           mediaMeta,
           messageType,
         }),
+        hasImage: imageMessage,
       })) ||
       ai.reply ||
       "Siap kak 😊 silakan ditanyakan.";
@@ -742,6 +828,7 @@ router.post("/", async (req, res) => {
       sessionId: session.id,
       message: chatReply,
       intent: "CHAT",
+      waTimeout,
       rawPayload: {
         topic,
         aiData: ai.data || {},
@@ -768,6 +855,7 @@ router.post("/", async (req, res) => {
           sessionName,
           from,
           "Maaf kak 🙏 sistem sedang gangguan sebentar. Coba kirim ulang pesan ya.",
+          { timeout: 10000 },
         );
       }
     } catch (_) {
