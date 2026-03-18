@@ -2,27 +2,43 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState,
   jidNormalizedUser,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  downloadMediaMessage,
 } from "@whiskeysockets/baileys";
 
 import pino from "pino";
 import qrcode from "qrcode-terminal";
 import fs from "fs";
+import path from "path";
 import mime from "mime-types";
 import axios from "axios";
 
-// Ambil text dari berbagai tipe pesan
+// ===============================
+// Helpers
+// ===============================
+
 function extractTextMessage(msg) {
   return (
     msg.message?.conversation ||
     msg.message?.extendedTextMessage?.text ||
     msg.message?.imageMessage?.caption ||
     msg.message?.videoMessage?.caption ||
+    msg.message?.documentMessage?.caption ||
     ""
   );
 }
 
-// Resolve JID user yang benar (nomor), walaupun LID mode
+function getMessageType(msg) {
+  const m = msg?.message || {};
+
+  if (m.conversation || m.extendedTextMessage) return "text";
+  if (m.imageMessage) return "image";
+  if (m.videoMessage) return "video";
+  if (m.documentMessage) return "document";
+
+  return "unknown";
+}
+
 function resolveUserJid(msg) {
   const k = msg.key || {};
 
@@ -33,12 +49,28 @@ function resolveUserJid(msg) {
   return null;
 }
 
+function ensureDir(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}
+
+function getFileExtensionFromMime(mimetype = "", fallback = "bin") {
+  const ext = mime.extension(mimetype);
+  return ext || fallback;
+}
+
+// ===============================
 // Dedupe message id
+// ===============================
+
 const seenMsgIds = new Set();
+
 function isDuplicateMessage(msg) {
   const id = msg.key?.id;
   if (!id) return false;
   if (seenMsgIds.has(id)) return true;
+
   seenMsgIds.add(id);
   setTimeout(() => seenMsgIds.delete(id), 60_000);
   return false;
@@ -49,17 +81,23 @@ export default class WASession {
     this.sessionId = sessionId;
     this.webhook = webhook;
     this.sock = null;
-    this.state = { ready: false, qr: null };
+    this.state = {
+      ready: false,
+      qr: null,
+    };
   }
 
   async init() {
-    const { state, saveCreds } = await useMultiFileAuthState(`./auth/${this.sessionId}`);
-  const { version } = await fetchLatestBaileysVersion();
+    const { state, saveCreds } = await useMultiFileAuthState(
+      `./auth/${this.sessionId}`,
+    );
+    const { version } = await fetchLatestBaileysVersion();
+
     this.sock = makeWASocket({
       version,
       auth: state,
       markOnlineOnConnect: true,
-      syncFullHistory: false, 
+      syncFullHistory: false,
       browser: ["Chrome", "Windows", "10"],
       logger: pino({ level: "info" }),
     });
@@ -83,6 +121,7 @@ export default class WASession {
       if (connection === "close") {
         this.state.ready = false;
         const code = lastDisconnect?.error?.output?.statusCode;
+
         console.log("⚠️ WA disconnected:", code);
 
         if (code !== DisconnectReason.loggedOut) {
@@ -96,34 +135,90 @@ export default class WASession {
       if (type !== "notify") return;
 
       for (const msg of messages) {
-        if (!msg?.message) continue;
-        if (msg.key?.fromMe) continue;
-        if (isDuplicateMessage(msg)) continue;
-
-        const rawJid = msg.key?.remoteJid || "";
-        if (rawJid.includes("broadcast")) continue;
-
-        const text = extractTextMessage(msg);
-        if (!text) continue;
-
-        const from = resolveUserJid(msg);
-        if (!from) {
-          console.log("⛔ No valid user JID (privacy/LID-only)");
-          continue;
-        }
-
-        if (!this.webhook?.url) continue;
-
-        console.log("📩 PESAN USER:", rawJid, "→", from, text);
-
         try {
+          if (!msg?.message) continue;
+          if (msg.key?.fromMe) continue;
+          if (isDuplicateMessage(msg)) continue;
+
+          const rawJid = msg.key?.remoteJid || "";
+          if (rawJid.includes("broadcast")) continue;
+
+          const from = resolveUserJid(msg);
+          if (!from) {
+            console.log("⛔ No valid user JID (privacy/LID-only)");
+            continue;
+          }
+
+          if (!this.webhook?.url) continue;
+
+          const messageType = getMessageType(msg);
+          const text = extractTextMessage(msg);
+          let imageUrl = null;
+          let imageBase64 = null;
+          let mediaMeta = null;
+
+          // ===============================
+          // Support inbound image
+          // ===============================
+          if (messageType === "image") {
+            try {
+              const buffer = await downloadMediaMessage(
+                msg,
+                "buffer",
+                {},
+                {
+                  logger: pino({ level: "silent" }),
+                  reuploadRequest: this.sock.updateMediaMessage,
+                },
+              );
+
+              if (buffer) {
+                const mimetype =
+                  msg.message?.imageMessage?.mimetype || "image/jpeg";
+                imageBase64 = `data:${mimetype};base64,${buffer.toString("base64")}`;
+
+                mediaMeta = {
+                  type: "image",
+                  mimetype,
+                  caption: msg.message?.imageMessage?.caption || "",
+                };
+              }
+            } catch (err) {
+              console.error("download image error:", err.message);
+            }
+          }
+
+          // Bisa diteruskan meskipun tanpa text, asalkan ada gambar
+          if (!text && !imageBase64 && !imageUrl) continue;
+
+          console.log("📩 PESAN USER:", rawJid, "→", from, {
+            type: messageType,
+            text,
+            hasImage: !!imageBase64 || !!imageUrl,
+          });
+
           await axios.post(
             this.webhook.url,
-            { session: this.sessionId, from, message: text },
             {
-              timeout: 5000,
-              headers: { "x-webhook-secret": this.webhook.secret || "" },
-            }
+              session: this.sessionId,
+              from,
+              message: text || "",
+              messageId: msg.key?.id || null,
+              messageType,
+              imageUrl,
+              imageBase64,
+              mediaMeta,
+              raw: {
+                pushName: msg.pushName || null,
+                remoteJid: rawJid,
+              },
+            },
+            {
+              timeout: 10000,
+              headers: {
+                "x-webhook-secret": this.webhook.secret || "",
+              },
+            },
           );
         } catch (e) {
           console.error("Webhook error:", e.message);
@@ -132,49 +227,83 @@ export default class WASession {
     });
   }
 
-  // kirim selalu ke base @s.whatsapp.net, bisa input nomor atau jid
+  // kirim selalu ke base @s.whatsapp.net
   jid(phoneOrJid) {
     const s = String(phoneOrJid || "");
-    // jika sudah jid
-    if (s.endsWith("@s.whatsapp.net")) return jidNormalizedUser(s);
 
-    // ambil digit
+    if (s.endsWith("@s.whatsapp.net")) {
+      return jidNormalizedUser(s);
+    }
+
     let p = s.replace(/[^\d]/g, "");
     if (p.startsWith("0")) p = "62" + p.slice(1);
 
     return jidNormalizedUser(`${p}@s.whatsapp.net`);
   }
 
-  // async sendText(phoneOrJid, text) {
-  //   if (!this.state.ready) throw new Error("WA not ready");
-  //   return this.sock.sendMessage(this.jid(phoneOrJid), { text });
-  // }
-
-
   async sendText(phoneOrJid, text) {
-  if (!this.state.ready) {
-    return { ok: false, reason: "WA_NOT_READY" };
+    try {
+      if (!this.state.ready) {
+        return { ok: false, reason: "WA_NOT_READY", msg: "WA not ready" };
+      }
+
+      await this.sock.sendMessage(this.jid(phoneOrJid), { text });
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "SEND_TEXT_FAILED",
+        msg: err.message || "failed to send text",
+      };
+    }
   }
 
-  await this.sock.sendMessage(this.jid(phoneOrJid), { text });
-  return { ok: true };
-}
+  async sendFile(phoneOrJid, filePath, caption = "") {
+    try {
+      if (!this.state.ready) {
+        return { ok: false, reason: "WA_NOT_READY", msg: "WA not ready" };
+      }
 
+      const buffer = fs.readFileSync(filePath);
 
-  async sendFile(phoneOrJid, path, caption = "") {
-    if (!this.state.ready) throw new Error("WA not ready");
-    const buffer = fs.readFileSync(path);
-    return this.sock.sendMessage(this.jid(phoneOrJid), {
-      document: buffer,
-      mimetype: mime.lookup(path) || "application/octet-stream",
-      fileName: path.split("/").pop(),
-      caption,
-    });
+      await this.sock.sendMessage(this.jid(phoneOrJid), {
+        document: buffer,
+        mimetype: mime.lookup(filePath) || "application/octet-stream",
+        fileName: path.basename(filePath),
+        caption,
+      });
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "SEND_FILE_FAILED",
+        msg: err.message || "failed to send file",
+      };
+    }
   }
 
-  async sendImage(phoneOrJid, path, caption = "") {
-    if (!this.state.ready) throw new Error("WA not ready");
-    const buffer = fs.readFileSync(path);
-    return this.sock.sendMessage(this.jid(phoneOrJid), { image: buffer, caption });
+  async sendImage(phoneOrJid, filePath, caption = "") {
+    try {
+      if (!this.state.ready) {
+        return { ok: false, reason: "WA_NOT_READY", msg: "WA not ready" };
+      }
+
+      const buffer = fs.readFileSync(filePath);
+
+      await this.sock.sendMessage(this.jid(phoneOrJid), {
+        image: buffer,
+        caption,
+      });
+
+      return { ok: true };
+    } catch (err) {
+      return {
+        ok: false,
+        reason: "SEND_IMAGE_FAILED",
+        msg: err.message || "failed to send image",
+      };
+    }
   }
 }

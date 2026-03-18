@@ -18,77 +18,78 @@ export const faqGuide = {
     title: "Registrasi",
     steps: [
       "Buka aplikasi",
-      "Pilih menu Daftar / Registrasi Akun",
-      "Isi data yang diminta, seperti nomor hp, username, pin , password, alamat",
-      "Masukkan nomor HP aktif",      
-      "Setelah berhasil, akun siap digunakan",
+      "Pilih menu Daftar atau Registrasi Akun",
+      "Isi data yang diminta seperti nomor HP, username, PIN, password, dan alamat",
+      "Pastikan nomor HP yang dimasukkan aktif",
+      "Selesaikan proses pendaftaran sampai akun berhasil dibuat",
     ],
     reply:
-      "Untuk registrasi, kak bisa buka aplikasi lalu pilih menu Daftar, isi data yang diminta, masukkan nomor HP aktif, dan data lain yang diminta🙂",
+      "Untuk registrasi, kak bisa buka aplikasi lalu pilih menu Daftar, isi data yang diminta seperti nomor HP, username, PIN, password, dan alamat ya 🙂",
   },
 
   DOWNLOAD_APP: {
     title: "Download Aplikasi",
     steps: [
-      "Buka google Play store",
-      "cari LAZIMPAY",
-      "Install aplikasi",
-      "Buka aplikasi setelah terpasang",
+      "Buka Google Play Store",
+      "Cari aplikasi LAZIMPAY",
+      "Klik Install",
+      "Buka aplikasi setelah selesai terpasang",
       "Login atau daftar akun",
     ],
     reply:
-      "Untuk download aplikasi, download di google Play Lazimpay. Setelah itu tinggal install lalu login atau daftar 🙂",
+      "Untuk download aplikasi, kak bisa buka Google Play Store lalu cari LAZIMPAY, setelah itu install dan buka aplikasinya ya 🙂",
   },
 
   HOW_TO_DEPOSIT: {
     title: "Cara Deposit",
     steps: [
-      "Masuk ke menu Deposit / Tambah Saldo di Homepage",
-      "Pilih metode deposit yang tersedia (saran TIKE BANK BCA dan Virtual Account)",
-      "Transfer sesuai nominal dan tujuan yang muncul",
-      "Tunggu saldo masuk otomatis atau konfirmasi jika diperlukan",
+      "Masuk ke menu Deposit atau Tambah Saldo di halaman utama",
+      "Pilih metode deposit yang tersedia",
+      "Disarankan menggunakan Tiket Bank BCA atau Virtual Account",
+      "Transfer sesuai nominal dan tujuan yang muncul di aplikasi",
+      "Tunggu saldo masuk otomatis atau lakukan konfirmasi jika diperlukan",
     ],
     reply:
-      "Untuk deposit, kak bisa masuk ke menu Deposit / Tambah Saldo, pilih metode yang tersedia, lalu transfer sesuai instruksi yang muncul ya 🙂",
+      "Untuk deposit, kak bisa masuk ke menu Deposit atau Tambah Saldo di homepage, pilih metode yang tersedia, lalu transfer sesuai instruksi yang muncul ya 🙂",
   },
 
   HOW_TO_TRANSACTION: {
     title: "Cara Transaksi",
     steps: [
-      "Pilih menu produk",
+      "Pilih menu produk yang ingin dibeli",
       "Masukkan nomor tujuan",
-      "Pilih produk",
+      "Pilih produk atau nominal",
       "Cek detail transaksi",
-      "Masukkan Pin ",
-      "dan Bayar",
+      "Masukkan PIN",
+      "Lalu lanjutkan pembayaran",
     ],
     reply:
-      "Untuk transaksi, kak tinggal pilih menu produk, masukkan nomor tujuan, pilih nominal, lalu lanjutkan pembayaran ya 🙂",
+      "Untuk transaksi, kak tinggal pilih menu produk, masukkan nomor tujuan, pilih produk, cek detail transaksi, lalu masukkan PIN untuk bayar ya 🙂",
   },
 
   ACCOUNT_HELP: {
     title: "Bantuan Akun",
     steps: [
       "Pastikan nomor HP yang dipakai masih aktif",
-      "Coba login ulang",
+      "Coba login ulang ke aplikasi",
       "Jika lupa PIN, gunakan menu Lupa PIN",
-      "Jika masih terkendala, hubungi admin dengan data akun",
+      "Jika masih terkendala, kirim data akun agar bisa dibantu cek",
     ],
     reply:
-      "Kalau kendala akun, kak bisa coba login ulang dulu ya. Kalau lupa PIN gunakan menu Lupa PIN. Kalau masih terkendala, kirim data akun biar dibantu cek 🙂",
+      "Kalau kendala akun, kak bisa coba login ulang dulu ya. Kalau lupa PIN, gunakan menu Lupa PIN. Kalau masih terkendala, kirim data akun biar dibantu cek 🙂",
   },
 
   DOWNLINE_INFO: {
     title: "Daftar Downline",
     steps: [
-      "Masuk ke Akun",
-      "Pilih Daftar Agen",
-      "Klik Icon Pojok Kanan Bawah (+agen)",
+      "Masuk ke menu Akun",
+      "Pilih menu Daftar Agen",
+      "Klik ikon pojok kanan bawah untuk tambah agen",
       "Isi data downline yang diminta",
       "Simpan data",
     ],
     reply:
-      "Untuk daftar downline, kak bisa masuk ke menu downline lalu pilih tambah / daftar downline dan isi data yang diminta ya 🙂",
+      "Untuk daftar downline, kak bisa masuk ke menu Akun, pilih Daftar Agen, lalu klik tambah agen dan isi data yang diminta ya 🙂",
   },
 
   APP_PROBLEM: {
@@ -97,10 +98,10 @@ export const faqGuide = {
       "Tutup aplikasi lalu buka kembali",
       "Pastikan koneksi internet stabil",
       "Coba login ulang",
-      "Jika masih error, kirim detail kendalanya",
+      "Jika masih error, kirim detail kendalanya atau screenshot error",
     ],
     reply:
-      "Kalau aplikasi terkendala, kak bisa coba tutup lalu buka lagi aplikasinya, pastikan internet stabil, lalu coba login ulang ya 🙂",
+      "Kalau aplikasi terkendala, kak bisa coba tutup lalu buka lagi aplikasinya, pastikan internet stabil, lalu coba login ulang ya. Kalau masih error, kirim detail kendalanya 🙂",
   },
 
   SALDO_INFO: {
@@ -108,7 +109,7 @@ export const faqGuide = {
     steps: [
       "Login ke aplikasi",
       "Lihat saldo di halaman utama",
-      "Jika saldo tidak sesuai, cek riwayat mutasi atau transaksi",
+      "Jika saldo tidak sesuai, cek riwayat mutasi atau riwayat transaksi",
     ],
     reply:
       "Untuk cek saldo, kak bisa lihat di halaman utama aplikasi ya. Kalau ada selisih, cek juga riwayat mutasi atau transaksi 🙂",

@@ -76,6 +76,14 @@ function clampConfidence(v) {
   return n;
 }
 
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isDataImageUrl(v = "") {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(v || "").trim());
+}
+
 function buildMemoryMessages(mem = {}) {
   const messages = [];
 
@@ -140,6 +148,81 @@ function buildMemoryMessages(mem = {}) {
   }
 
   return messages;
+}
+
+function buildMemoryText(mem = {}) {
+  const parts = [];
+
+  if (mem?.lastIntent && mem.lastIntent !== "UNKNOWN") {
+    parts.push(`LAST_INTENT: ${mem.lastIntent}`);
+  }
+
+  if (mem?.flowState) {
+    parts.push(`FLOW_STATE: ${mem.flowState}`);
+  }
+
+  if (mem?.lastContext) {
+    parts.push(`LAST_CONTEXT: ${mem.lastContext}`);
+  }
+
+  if (mem?.lastTarget) {
+    parts.push(`LAST_TARGET: ${mem.lastTarget}`);
+  }
+
+  if (mem?.mood) {
+    parts.push(`USER_MOOD: ${mem.mood}`);
+  }
+
+  if (mem?.short) {
+    parts.push(`SHORT_MEMORY: ${mem.short}`);
+  }
+
+  if (mem?.summary) {
+    parts.push(`LONG_MEMORY: ${mem.summary}`);
+  }
+
+  if (Array.isArray(mem?.recentMessages) && mem.recentMessages.length) {
+    parts.push(
+      "RECENT_MESSAGES:\n" +
+        mem.recentMessages
+          .map((m) => `${m.role?.toUpperCase?.() || "UNKNOWN"}: ${m.content}`)
+          .join("\n"),
+    );
+  }
+
+  return parts.join("\n\n");
+}
+
+function buildUserInput({ message = "", imageUrl = null, imageBase64 = null }) {
+  const content = [];
+
+  if (isNonEmptyString(message)) {
+    content.push({
+      type: "input_text",
+      text: message.trim(),
+    });
+  }
+
+  if (isNonEmptyString(imageUrl)) {
+    content.push({
+      type: "input_image",
+      image_url: imageUrl.trim(),
+      detail: "auto",
+    });
+  }
+
+  if (isNonEmptyString(imageBase64) && isDataImageUrl(imageBase64)) {
+    content.push({
+      type: "input_image",
+      image_url: imageBase64.trim(),
+      detail: "auto",
+    });
+  }
+
+  return {
+    role: "user",
+    content,
+  };
 }
 
 function normalizeDecision(parsed = {}) {
@@ -275,16 +358,27 @@ function buildFallbackReply({
 
 // =====================================================
 // /cs/decide
+// Support text + image
 // =====================================================
 
 router.post("/cs/decide", async (req, res) => {
   const sessionId = String(req.body.sessionId || "").trim();
   const userId = String(req.body.userId || "").trim();
   const message = String(req.body.message || "").trim();
+  const imageUrl = isNonEmptyString(req.body.imageUrl) ? String(req.body.imageUrl).trim() : null;
+  const imageBase64 = isNonEmptyString(req.body.imageBase64)
+    ? String(req.body.imageBase64).trim()
+    : null;
 
-  console.log("/cs/decide", req.body);
+  console.log("/cs/decide", {
+    sessionId,
+    userId,
+    message,
+    hasImageUrl: !!imageUrl,
+    hasImageBase64: !!imageBase64,
+  });
 
-  if (!sessionId || !userId || !message) {
+  if (!sessionId || !userId || (!message && !imageUrl && !imageBase64)) {
     return res.status(400).json({
       ok: false,
       message: "Bad request",
@@ -297,19 +391,36 @@ router.post("/cs/decide", async (req, res) => {
     const mem = await getAIMemory(sessionId);
     console.log("decide-memory", mem);
 
-    const messages = [
-      { role: "system", content: systemPrompt(brand) },
-      ...buildMemoryMessages(mem),
-      { role: "user", content: message },
+    const memoryText = buildMemoryText(mem);
+    const userInput = buildUserInput({ message, imageUrl, imageBase64 });
+
+    const input = [
+      {
+        role: "system",
+        content: systemPrompt(brand),
+      },
     ];
 
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",      
-      response_format: { type: "json_object" },
-      messages,
+    if (memoryText) {
+      input.push({
+        role: "system",
+        content: memoryText,
+      });
+    }
+
+    input.push(userInput);
+
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      input,
+      text: {
+        format: {
+          type: "json_object",
+        },
+      },
     });
 
-    const raw = completion.choices?.[0]?.message?.content || "";
+    const raw = response.output_text || "";
     console.log("DECIDE RAW", raw);
 
     const parsed = safeJsonParse(raw) || {};
@@ -327,7 +438,10 @@ router.post("/cs/decide", async (req, res) => {
       data: decision,
     });
   } catch (err) {
-    console.error("OPENAI /cs/decide ERROR:", err.response?.data || err.message);
+    console.error(
+      "OPENAI /cs/decide ERROR:",
+      err?.response?.data || err?.message || err,
+    );
 
     const fallback = {
       intent: "CHAT",
@@ -362,6 +476,7 @@ router.post("/cs/decide", async (req, res) => {
 
 // =====================================================
 // /cs/reply
+// Text only
 // =====================================================
 
 router.post("/cs/reply", async (req, res) => {
@@ -430,7 +545,7 @@ router.post("/cs/reply", async (req, res) => {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",      
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
       response_format: { type: "json_object" },
       messages,
     });
@@ -457,7 +572,10 @@ router.post("/cs/reply", async (req, res) => {
       },
     });
   } catch (err) {
-    console.error("OPENAI /cs/reply ERROR:", err.response?.data || err.message);
+    console.error(
+      "OPENAI /cs/reply ERROR:",
+      err?.response?.data || err?.message || err,
+    );
 
     const fallbackReply = buildFallbackReply({
       intent,

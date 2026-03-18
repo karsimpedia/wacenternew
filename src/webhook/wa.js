@@ -62,7 +62,7 @@ function isGeneralChat(text = "") {
 }
 
 function onlyDigits(text = "") {
-  return String(text).replace(/\D/g, "");
+  return String(text || "").replace(/\D/g, "");
 }
 
 function normalizeMsisdn(v) {
@@ -78,6 +78,76 @@ function normalizeTrxId(v) {
 function normalizeInvoiceId(v) {
   const s = String(v || "").trim();
   return s.length ? s : null;
+}
+
+function normalizeTopic(v) {
+  const allowedTopics = new Set([
+    "REGISTER",
+    "FORGOT_PIN",
+    "DOWNLOAD_APP",
+    "HOW_TO_DEPOSIT",
+    "HOW_TO_TRANSACTION",
+    "ACCOUNT_HELP",
+    "DOWNLINE_INFO",
+    "APP_PROBLEM",
+    "SALDO_INFO",
+  ]);
+
+  const s = String(v || "").trim().toUpperCase();
+  return allowedTopics.has(s) ? s : null;
+}
+
+function isNonEmptyString(v) {
+  return typeof v === "string" && v.trim().length > 0;
+}
+
+function isDataImageUrl(v = "") {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(v || "").trim());
+}
+
+function normalizeImageUrl(v) {
+  if (!isNonEmptyString(v)) return null;
+  const s = String(v).trim();
+  if (/^https?:\/\//i.test(s)) return s;
+  return null;
+}
+
+function normalizeImageBase64(v) {
+  if (!isNonEmptyString(v)) return null;
+  const s = String(v).trim();
+  return isDataImageUrl(s) ? s : null;
+}
+
+/**
+ * Ambil gambar dari berbagai kemungkinan payload gateway WA.
+ * Kamu bisa sesuaikan lagi kalau format payload gateway kamu sudah pasti.
+ */
+function extractImagePayload(body = {}) {
+  const directImageUrl =
+    normalizeImageUrl(body.imageUrl) ||
+    normalizeImageUrl(body.mediaUrl) ||
+    normalizeImageUrl(body.url) ||
+    normalizeImageUrl(body.image?.url) ||
+    normalizeImageUrl(body.media?.url) ||
+    normalizeImageUrl(body.message?.imageUrl) ||
+    normalizeImageUrl(body.message?.mediaUrl) ||
+    normalizeImageUrl(body.data?.imageUrl) ||
+    null;
+
+  const directImageBase64 =
+    normalizeImageBase64(body.imageBase64) ||
+    normalizeImageBase64(body.base64) ||
+    normalizeImageBase64(body.image?.base64) ||
+    normalizeImageBase64(body.media?.base64) ||
+    normalizeImageBase64(body.message?.imageBase64) ||
+    normalizeImageBase64(body.data?.imageBase64) ||
+    null;
+
+  return {
+    imageUrl: directImageUrl,
+    imageBase64: directImageBase64,
+    hasImage: !!directImageUrl || !!directImageBase64,
+  };
 }
 
 async function sendAndSaveReply({
@@ -102,21 +172,30 @@ async function sendAndSaveReply({
   return reply;
 }
 
-async function callAIDecide({ sessionId, userId, message }) {
+async function callAIDecide({
+  sessionId,
+  userId,
+  message,
+  imageUrl = null,
+  imageBase64 = null,
+}) {
   const resp = await axios.post(
     AI_DECIDE_URL,
     {
       sessionId,
       userId,
       message,
+      imageUrl,
+      imageBase64,
     },
-    { timeout: 15000 },
+    { timeout: 20000 },
   );
 
   const data = resp.data?.data || resp.data || {};
 
   return {
     intent: String(data.intent || "CHAT").toUpperCase(),
+    topic: normalizeTopic(data.topic),
     trxId: normalizeTrxId(data.trxId),
     invoiceId: normalizeInvoiceId(data.invoiceId),
     msisdn: normalizeMsisdn(data.msisdn),
@@ -139,6 +218,7 @@ async function callAIReply({
   userId,
   userMessage,
   intent,
+  topic = null,
   transaction = null,
   actionTaken = null,
   extraContext = null,
@@ -152,6 +232,7 @@ async function callAIReply({
         brand: BRAND_NAME,
         userMessage,
         intent,
+        topic,
         transaction,
         actionTaken,
         extraContext,
@@ -169,7 +250,7 @@ async function callAIReply({
 }
 
 function buildSupplierMessage(trx) {
-  const target = trx?.msisdn || trx?.invoiceId || "-";
+  const target = trx?.msisdn || trx?.invoiceId || trx?.id || "-";
   const status = String(trx?.status || "UNKNOWN").toUpperCase();
 
   if (status === "SUCCESS") {
@@ -195,6 +276,25 @@ function buildLookup(ai) {
   return null;
 }
 
+function buildReplyExtraContext({
+  ai = {},
+  session = {},
+  hasImage = false,
+  imageUrl = null,
+}) {
+  return {
+    topic: ai?.topic || null,
+    ask: ai?.ask || null,
+    aiData: ai?.data || {},
+    hasImage,
+    imageUrl: imageUrl || null,
+    flowState: session?.flowState || null,
+    lastIntent: session?.lastIntent || null,
+    lastContext: session?.lastContext || null,
+    lastTarget: session?.lastTarget || null,
+  };
+}
+
 router.post("/", async (req, res) => {
   if (!verifySecret(req)) {
     return res.status(401).json({ ok: false });
@@ -202,10 +302,12 @@ router.post("/", async (req, res) => {
 
   const sessionName = String(req.body.session || DEFAULT_SESSION).trim();
   const from = String(req.body.from || "").trim();
-  const userText = String(req.body.message || "").trim();
+  const userText = String(req.body.message || req.body.text || "").trim();
   const externalId = req.body.messageId ? String(req.body.messageId) : null;
 
-  if (!from || !userText) {
+  const { imageUrl, imageBase64, hasImage } = extractImagePayload(req.body);
+
+  if (!from || (!userText && !hasImage)) {
     return res.json({ ok: true });
   }
 
@@ -215,7 +317,7 @@ router.post("/", async (req, res) => {
     try {
       await saveIncomingMessage({
         sessionId: session.id,
-        message: userText,
+        message: userText || "[IMAGE]",
         externalId,
         rawPayload: req.body || null,
       });
@@ -231,9 +333,12 @@ router.post("/", async (req, res) => {
       sessionId: session.id,
       userId: from,
       message: userText,
+      imageUrl,
+      imageBase64,
     });
 
     const intent = ai.intent;
+    const topic = ai.topic;
 
     // =========================
     // 1) CANCEL COMPLAIN
@@ -248,6 +353,7 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
+        rawPayload: { topic, aiData: ai.data || {} },
       });
 
       await resetSession(session.id);
@@ -261,6 +367,21 @@ router.post("/", async (req, res) => {
       const depositData = buildDepositContext(ai.data);
 
       const reply =
+        (await callAIReply({
+          sessionId: session.id,
+          userId: from,
+          userMessage: userText || "User mengirim bukti deposit",
+          intent,
+          topic,
+          transaction: null,
+          actionTaken: { type: "ASK_DEPOSIT_DATA" },
+          extraContext: buildReplyExtraContext({
+            ai,
+            session,
+            hasImage,
+            imageUrl,
+          }),
+        })) ||
         ai.reply ||
         "Siap kak 🙏 mohon kirim data depositnya ya: nominal transfer, bank tujuan deposit, ID reseller, dan waktu transfer jika ada.";
 
@@ -270,6 +391,7 @@ router.post("/", async (req, res) => {
         sessionId: session.id,
         message: reply,
         intent,
+        rawPayload: { topic, depositData },
       });
 
       await updateSession(session.id, {
@@ -288,6 +410,21 @@ router.post("/", async (req, res) => {
     if (["FOLLOWUP", "CHECK_STATUS", "COMPLAIN"].includes(intent)) {
       if (!ai.trxId && !ai.invoiceId && !ai.msisdn) {
         const askReply =
+          (await callAIReply({
+            sessionId: session.id,
+            userId: from,
+            userMessage: userText || "User mengirim screenshot transaksi",
+            intent,
+            topic,
+            transaction: null,
+            actionTaken: { type: "ASK_TRX_DATA" },
+            extraContext: buildReplyExtraContext({
+              ai,
+              session,
+              hasImage,
+              imageUrl,
+            }),
+          })) ||
           ai.reply ||
           "Boleh kirim ID transaksi, invoice, atau nomor tujuan ya kak 🙏";
 
@@ -297,6 +434,7 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: askReply,
           intent,
+          rawPayload: { topic, aiData: ai.data || {}, hasImage },
         });
 
         await updateSession(session.id, {
@@ -317,8 +455,9 @@ router.post("/", async (req, res) => {
           (await callAIReply({
             sessionId: session.id,
             userId: from,
-            userMessage: userText,
+            userMessage: userText || "User mengirim data transaksi",
             intent,
+            topic,
             transaction: {
               found: false,
               trxId: ai.trxId || null,
@@ -328,7 +467,14 @@ router.post("/", async (req, res) => {
             actionTaken: {
               type: "NOT_FOUND",
             },
-          })) || "Transaksi tidak ditemukan kak 🙏";
+            extraContext: buildReplyExtraContext({
+              ai,
+              session,
+              hasImage,
+              imageUrl,
+            }),
+          })) ||
+          "Transaksi tidak ditemukan kak 🙏";
 
         await sendAndSaveReply({
           sessionName,
@@ -336,6 +482,7 @@ router.post("/", async (req, res) => {
           sessionId: session.id,
           message: reply,
           intent,
+          rawPayload: { topic, lookup },
         });
 
         await resetSession(session.id);
@@ -344,7 +491,12 @@ router.post("/", async (req, res) => {
 
       await updateSession(session.id, {
         lastTarget:
-          trx?.msisdn || trx?.invoiceId || ai.msisdn || ai.invoiceId || ai.trxId || null,
+          trx?.msisdn ||
+          trx?.invoiceId ||
+          ai.msisdn ||
+          ai.invoiceId ||
+          ai.trxId ||
+          null,
       });
 
       // ---------- FOLLOWUP ----------
@@ -354,8 +506,9 @@ router.post("/", async (req, res) => {
             (await callAIReply({
               sessionId: session.id,
               userId: from,
-              userMessage: userText,
+              userMessage: userText || "User minta follow up",
               intent,
+              topic,
               transaction: {
                 found: true,
                 id: trx.id ?? null,
@@ -367,6 +520,12 @@ router.post("/", async (req, res) => {
               actionTaken: {
                 type: "SUPPLIER_CONTACT_MISSING",
               },
+              extraContext: buildReplyExtraContext({
+                ai,
+                session,
+                hasImage,
+                imageUrl,
+              }),
             })) ||
             "Saya sudah cek transaksinya kak, tapi kontak CS supplier belum tersedia 🙏";
 
@@ -389,8 +548,9 @@ router.post("/", async (req, res) => {
           (await callAIReply({
             sessionId: session.id,
             userId: from,
-            userMessage: userText,
+            userMessage: userText || "User minta follow up",
             intent,
+            topic,
             transaction: {
               found: true,
               id: trx.id ?? null,
@@ -404,6 +564,12 @@ router.post("/", async (req, res) => {
                 ? "FOLLOWUP_SUPPLIER_SENT"
                 : "FOLLOWUP_SUPPLIER_FAILED",
             },
+            extraContext: buildReplyExtraContext({
+              ai,
+              session,
+              hasImage,
+              imageUrl,
+            }),
           })) ||
           (result?.sent
             ? "Siap kak 🙏 sudah saya follow up ke supplier. Mohon ditunggu ya."
@@ -441,8 +607,9 @@ router.post("/", async (req, res) => {
         (await callAIReply({
           sessionId: session.id,
           userId: from,
-          userMessage: userText,
+          userMessage: userText || "User cek transaksi",
           intent,
+          topic,
           transaction: {
             found: true,
             id: trx.id ?? null,
@@ -454,6 +621,12 @@ router.post("/", async (req, res) => {
             supplier: trx.supplier ?? null,
           },
           actionTaken,
+          extraContext: buildReplyExtraContext({
+            ai,
+            session,
+            hasImage,
+            imageUrl,
+          }),
         })) || "Siap kak 🙏 sedang saya bantu cek ya.";
 
       await sendAndSaveReply({
@@ -469,16 +642,23 @@ router.post("/", async (req, res) => {
     }
 
     // =========================
-    // 4) CHAT BIASA
+    // 4) CHAT BIASA / FAQ
     // =========================
     const chatReply =
       (await callAIReply({
         sessionId: session.id,
         userId: from,
-        userMessage: userText,
+        userMessage: userText || "User mengirim gambar",
         intent: "CHAT",
+        topic,
         transaction: null,
         actionTaken: { type: "CHAT_ONLY" },
+        extraContext: buildReplyExtraContext({
+          ai,
+          session,
+          hasImage,
+          imageUrl,
+        }),
       })) ||
       ai.reply ||
       "Siap kak 😊 silakan ditanyakan.";
@@ -489,12 +669,14 @@ router.post("/", async (req, res) => {
       sessionId: session.id,
       message: chatReply,
       intent: "CHAT",
+      rawPayload: { topic, aiData: ai.data || {}, hasImage },
     });
 
     await updateSession(session.id, {
       flowState: FLOW.CHAT,
       lastIntent: "CHAT",
-      lastContext: null,
+      lastContext: topic || null,
+      lastTarget: null,
     });
 
     return res.json({ ok: true });
