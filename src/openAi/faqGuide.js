@@ -18,33 +18,33 @@ export const faqGuide = {
     title: "Registrasi",
     steps: [
       "Buka aplikasi",
-      "Pilih menu Daftar",
-      "Isi data yang diminta",
-      "Masukkan nomor HP aktif",
-      "Verifikasi dengan kode OTP",
+      "Pilih menu Daftar / Registrasi Akun",
+      "Isi data yang diminta, seperti nomor hp, username, pin , password, alamat",
+      "Masukkan nomor HP aktif",      
       "Setelah berhasil, akun siap digunakan",
     ],
     reply:
-      "Untuk registrasi, kak bisa buka aplikasi lalu pilih menu Daftar, isi data yang diminta, masukkan nomor HP aktif, lalu verifikasi OTP ya 🙂",
+      "Untuk registrasi, kak bisa buka aplikasi lalu pilih menu Daftar, isi data yang diminta, masukkan nomor HP aktif, dan data lain yang diminta🙂",
   },
 
   DOWNLOAD_APP: {
     title: "Download Aplikasi",
     steps: [
-      "Buka link download resmi aplikasi",
+      "Buka google Play store",
+      "cari LAZIMPAY",
       "Install aplikasi",
       "Buka aplikasi setelah terpasang",
       "Login atau daftar akun",
     ],
     reply:
-      "Untuk download aplikasi, kak bisa pakai link resmi yang tersedia ya. Setelah itu tinggal install lalu login atau daftar 🙂",
+      "Untuk download aplikasi, download di google Play Lazimpay. Setelah itu tinggal install lalu login atau daftar 🙂",
   },
 
   HOW_TO_DEPOSIT: {
     title: "Cara Deposit",
     steps: [
-      "Masuk ke menu Deposit / Tambah Saldo",
-      "Pilih metode deposit yang tersedia",
+      "Masuk ke menu Deposit / Tambah Saldo di Homepage",
+      "Pilih metode deposit yang tersedia (saran TIKE BANK BCA dan Virtual Account)",
       "Transfer sesuai nominal dan tujuan yang muncul",
       "Tunggu saldo masuk otomatis atau konfirmasi jika diperlukan",
     ],
@@ -55,11 +55,12 @@ export const faqGuide = {
   HOW_TO_TRANSACTION: {
     title: "Cara Transaksi",
     steps: [
-      "Pilih menu produk yang ingin dibeli",
+      "Pilih menu produk",
       "Masukkan nomor tujuan",
-      "Pilih nominal atau produk",
+      "Pilih produk",
       "Cek detail transaksi",
-      "Lanjutkan pembayaran",
+      "Masukkan Pin ",
+      "dan Bayar",
     ],
     reply:
       "Untuk transaksi, kak tinggal pilih menu produk, masukkan nomor tujuan, pilih nominal, lalu lanjutkan pembayaran ya 🙂",
@@ -80,8 +81,9 @@ export const faqGuide = {
   DOWNLINE_INFO: {
     title: "Daftar Downline",
     steps: [
-      "Masuk ke menu downline / jaringan",
-      "Pilih tambah atau daftar downline",
+      "Masuk ke Akun",
+      "Pilih Daftar Agen",
+      "Klik Icon Pojok Kanan Bawah (+agen)",
       "Isi data downline yang diminta",
       "Simpan data",
     ],
