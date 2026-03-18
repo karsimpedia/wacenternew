@@ -4,6 +4,7 @@ import express from "express";
 import OpenAI from "openai";
 
 import { systemPrompt, replyPrompt } from "./csPrompt.js";
+import { faqGuide } from "./faqGuide.js";
 import { getAIMemory, saveAIDecision } from "../services/aiMemory.service.js";
 
 const router = express.Router();
@@ -40,6 +41,23 @@ function normalizeInvoiceId(v) {
   return s.length ? s : null;
 }
 
+function normalizeTopic(v) {
+  const allowedTopics = new Set([
+    "REGISTER",
+    "FORGOT_PIN",
+    "DOWNLOAD_APP",
+    "HOW_TO_DEPOSIT",
+    "HOW_TO_TRANSACTION",
+    "ACCOUNT_HELP",
+    "DOWNLINE_INFO",
+    "APP_PROBLEM",
+    "SALDO_INFO",
+  ]);
+
+  const s = String(v || "").trim().toUpperCase();
+  return allowedTopics.has(s) ? s : null;
+}
+
 function toBool(v, fallback = false) {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") {
@@ -48,6 +66,14 @@ function toBool(v, fallback = false) {
     if (x === "false") return false;
   }
   return fallback;
+}
+
+function clampConfidence(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
 }
 
 function buildMemoryMessages(mem = {}) {
@@ -130,6 +156,7 @@ function normalizeDecision(parsed = {}) {
   const rawIntent = String(parsed?.intent || "CHAT").trim().toUpperCase();
   const intent = allowedIntents.has(rawIntent) ? rawIntent : "CHAT";
 
+  const topic = normalizeTopic(parsed?.topic);
   const trxId = normalizeTrxId(parsed?.trxId);
   const invoiceId = normalizeInvoiceId(parsed?.invoiceId);
   const msisdn = normalizeMsisdn(parsed?.msisdn);
@@ -144,7 +171,12 @@ function normalizeDecision(parsed = {}) {
       ? parsed.reply.trim()
       : null;
 
-  const confidence = Number(parsed?.confidence || 0);
+  const data =
+    parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
+      ? parsed.data
+      : {};
+
+  const confidence = clampConfidence(parsed?.confidence);
 
   const needsTransactionLookup =
     parsed?.needsTransactionLookup !== undefined
@@ -152,20 +184,16 @@ function normalizeDecision(parsed = {}) {
       : ["CHECK_STATUS", "COMPLAIN", "FOLLOWUP"].includes(intent) &&
         (!!trxId || !!invoiceId || !!msisdn);
 
-  const data =
-    parsed?.data && typeof parsed.data === "object" && !Array.isArray(parsed.data)
-      ? parsed.data
-      : {};
-
   return {
     intent,
+    topic,
     trxId,
     invoiceId,
     msisdn,
     ask,
     reply,
     data,
-    confidence: Number.isFinite(confidence) ? confidence : 0,
+    confidence,
     needsTransactionLookup,
   };
 }
@@ -179,8 +207,14 @@ function normalizeReply(parsed = {}) {
   return { reply };
 }
 
+function buildFaqContext(topic) {
+  if (!topic) return null;
+  return faqGuide?.[topic] || null;
+}
+
 function buildFallbackReply({
   intent = "CHAT",
+  topic = null,
   transaction = null,
   actionTaken = null,
 }) {
@@ -189,27 +223,27 @@ function buildFallbackReply({
   const status = String(tx?.status || "").toUpperCase();
 
   if (actionType === "NOT_FOUND") {
-    return "Transaksi tidak ditemukan kak 🙏";
+    return "Maaf kak, data transaksi yang dimaksud belum ketemu. Boleh kirim invoice, trx id, atau nomor tujuan ya 🙏";
   }
 
   if (actionType === "SUPPLIER_CONTACT_MISSING") {
-    return "Saya sudah cek transaksinya kak, tapi kontak CS supplier belum tersedia 🙏";
+    return "Maaf kak, transaksi sudah dicek tapi kontak CS supplier belum tersedia 🙏";
   }
 
   if (actionType === "FOLLOWUP_SUPPLIER_SENT") {
-    return "Siap kak 🙏 sudah saya follow up ke supplier. Mohon ditunggu ya.";
+    return "Siap kak, transaksi sudah kami bantu follow up ke supplier ya 🙏";
   }
 
   if (actionType === "FOLLOWUP_SUPPLIER_FAILED") {
-    return "Maaf kak 🙏 saya belum berhasil kirim follow up ke supplier.";
+    return "Maaf kak, follow up ke supplier belum berhasil dikirim 🙏";
   }
 
   if (actionType === "RESENT") {
-    return `Siap kak 🙏 transaksi saat ini berstatus *${status || "-"}* dan sudah saya bantu kirim ulang. Mohon ditunggu ya kak.`;
+    return `Siap kak, transaksi berstatus ${status || "-"} dan sudah kami bantu kirim ulang ya 🙏`;
   }
 
   if (actionType === "WAIT_ONLY") {
-    return `Siap kak 🙏 transaksi saat ini berstatus *${status || "-"}*. Mohon ditunggu dulu ya kak.`;
+    return `Siap kak, transaksi saat ini berstatus ${status || "-"} ya. Mohon ditunggu dulu 🙏`;
   }
 
   if (actionType === "STATUS_ONLY" || status === "SUCCESS") {
@@ -217,18 +251,26 @@ function buildFallbackReply({
     const serial = tx?.serial ?? "-";
     const msisdn = tx?.msisdn ?? "-";
 
-    return `📄 *Status Transaksi*\nID: ${id}\nStatus: *${status || "-"}*\nSN: *${serial}*\nMSISDN: *${msisdn}*`;
+    return `Status transaksi kak:\nID: ${id}\nStatus: ${status || "-"}\nSN: ${serial}\nNomor: ${msisdn}`;
   }
 
   if (actionType === "FINAL_STATUS") {
-    return `Transaksi sudah *${status || "-"}* kak. Coba cek kembali ID, invoice, atau nomor tujuan ya 🙏`;
+    return `Transaksi sudah ${status || "-"} kak. Silakan cek kembali ya 🙏`;
+  }
+
+  if (intent === "CHAT" && topic === "FORGOT_PIN") {
+    return "Kalau lupa PIN, kak bisa keluar dulu dari akun, lalu di halaman login klik Lupa PIN, masukkan nomor HP yang terdaftar, input OTP, lalu buat PIN baru ya 🙂";
+  }
+
+  if (intent === "CHAT" && topic === "REGISTER") {
+    return "Untuk registrasi, kak bisa buka aplikasi lalu pilih menu Daftar, isi data yang diminta, lalu verifikasi nomor HP dengan OTP ya 🙂";
   }
 
   if (intent === "CHAT") {
-    return "Siap kak 😊 silakan ditanyakan.";
+    return "Siap kak 🙂 silakan disampaikan yang ingin ditanyakan ya.";
   }
 
-  return "Siap kak 🙏 sedang saya bantu cek ya.";
+  return "Siap kak, sedang kami bantu cek ya 🙏";
 }
 
 // =====================================================
@@ -262,7 +304,9 @@ router.post("/cs/decide", async (req, res) => {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",     
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      temperature: 0.1,
+      response_format: { type: "json_object" },
       messages,
     });
 
@@ -275,7 +319,7 @@ router.post("/cs/decide", async (req, res) => {
     await saveAIDecision({
       sessionId,
       intent: decision.intent,
-      context: decision.ask,
+      context: decision.ask || decision.topic || null,
       confidence: decision.confidence,
     });
 
@@ -288,6 +332,7 @@ router.post("/cs/decide", async (req, res) => {
 
     const fallback = {
       intent: "CHAT",
+      topic: null,
       trxId: null,
       invoiceId: null,
       msisdn: null,
@@ -326,10 +371,21 @@ router.post("/cs/reply", async (req, res) => {
   const brand = String(req.body.brand || process.env.BRAND_NAME || "PulsaKu");
   const userMessage = String(req.body.userMessage || "").trim();
   const intent = String(req.body.intent || "CHAT").trim().toUpperCase();
+  const topic = normalizeTopic(req.body.topic);
 
   const transaction = req.body.transaction ?? null;
   const actionTaken = req.body.actionTaken ?? null;
-  const extraContext = req.body.extraContext ?? null;
+  const incomingExtraContext =
+    req.body.extraContext && typeof req.body.extraContext === "object"
+      ? req.body.extraContext
+      : {};
+
+  const faq = buildFaqContext(topic);
+
+  const extraContext = {
+    ...incomingExtraContext,
+    faq: incomingExtraContext?.faq || faq || null,
+  };
 
   console.log("/cs/reply", {
     sessionId,
@@ -337,6 +393,7 @@ router.post("/cs/reply", async (req, res) => {
     brand,
     userMessage,
     intent,
+    topic,
     transaction,
     actionTaken,
     extraContext,
@@ -360,6 +417,7 @@ router.post("/cs/reply", async (req, res) => {
           brand,
           userMessage,
           intent,
+          topic,
           transaction,
           actionTaken,
           extraContext,
@@ -373,7 +431,9 @@ router.post("/cs/reply", async (req, res) => {
     ];
 
     const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",    
+      model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+      temperature: 0.3,
+      response_format: { type: "json_object" },
       messages,
     });
 
@@ -387,6 +447,7 @@ router.post("/cs/reply", async (req, res) => {
       normalized.reply ||
       buildFallbackReply({
         intent,
+        topic,
         transaction,
         actionTaken,
       });
@@ -402,6 +463,7 @@ router.post("/cs/reply", async (req, res) => {
 
     const fallbackReply = buildFallbackReply({
       intent,
+      topic,
       transaction,
       actionTaken,
     });
