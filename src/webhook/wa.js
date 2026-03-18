@@ -855,7 +855,7 @@ router.post("/", async (req, res) => {
           sessionName,
           from,
           "Maaf kak 🙏 sistem sedang gangguan sebentar. Coba kirim ulang pesan ya.",
-          { timeout: 10000 },
+          { timeout: 30000 },
         );
       }
     } catch (_) {
